@@ -171,6 +171,16 @@ EOF
 python seed.py
 ```
 
+### 4.7 Start the backend server
+
+```bash
+python manage.py runserver 0.0.0.0:8000
+# or
+python manage.py runserver
+
+```
+
+
 ---
 
 ## Step 5 — Frontend Setup (React + Vite)

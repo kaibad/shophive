@@ -1,1 +1,72 @@
 @import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-brand-50: #eef2ff;
+  --color-brand-100: #dce4ff;
+  --color-brand-200: #b8c9ff;
+  --color-brand-400: #4a6ae8;
+  --color-brand-500: #2845d6;
+  --color-brand-600: #1a2ca3;
+  --color-brand-700: #152494;
+  --color-brand-800: #0d1a63;
+  --color-brand-900: #080616;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply bg-[#f4f6fc] text-brand-900 font-sans;
+    margin: 0;
+    min-height: 100vh;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}
+
+@layer components {
+  .page-main {
+    @apply pt-[4.5rem] min-h-screen;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-brand-800 px-6 py-2.5 text-sm font-semibold text-white shadow-sm transition-all duration-200 hover:bg-brand-600 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-brand-200 bg-white px-5 py-2.5 text-sm font-semibold text-brand-800 shadow-sm transition-all duration-200 hover:border-brand-400 hover:bg-brand-50 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-brand-800 transition-colors hover:bg-brand-50 hover:text-brand-600;
+  }
+
+  .input-field {
+    @apply w-full rounded-full border border-brand-100 bg-white px-4 py-3 text-sm text-brand-900 shadow-sm outline-none transition-all placeholder:text-slate-400 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20;
+  }
+
+  .card {
+    @apply rounded-[1.75rem] border border-brand-100/80 bg-white shadow-sm;
+  }
+
+  .section-title {
+    @apply text-2xl font-bold tracking-tight text-brand-900 sm:text-3xl;
+  }
+
+  .hero-card {
+    @apply relative overflow-hidden rounded-[1.75rem];
+  }
+}

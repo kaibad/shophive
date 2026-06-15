@@ -10,9 +10,10 @@ function CheckoutPage() {
     phone: "",
     payment_method: "COD",
   });
+  const [submitting, setSubmitting] = useState(false);
 
   const nav = useNavigate();
-  const { clearCart } = useCart();
+  const { clearCart, total } = useCart();
   const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 
   const handleChange = (e) =>
@@ -20,6 +21,7 @@ function CheckoutPage() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setSubmitting(true);
 
     try {
       const res = await authFetch(`${BASEURL}/api/orders/create/`, {
@@ -38,58 +40,105 @@ function CheckoutPage() {
       }
     } catch (error) {
       console.error("Checkout error:", error);
+      alert("Something went wrong. Please try again.");
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <div className="pt-20 p-6">
-      <div className="max-w-lg mx-auto bg-white p-6 shadow rounded">
-        <h1 className="text-2xl font-bold mb-4">Checkout</h1>
+    <main className="page-main px-4 pb-12 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-lg">
+        <div className="mb-8">
+          <h1 className="section-title">Checkout</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Complete your order details below
+          </p>
+        </div>
 
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <input
-            name="name"
-            value={form.name}
-            onChange={handleChange}
-            placeholder="Your Name"
-            required
-            className="w-full p-2 border rounded"
-          />
+        <div className="card p-6 sm:p-8">
+          {total > 0 && (
+            <div className="mb-6 rounded-xl bg-brand-50 px-4 py-3 text-sm">
+              <span className="text-slate-600">Order total: </span>
+              <span className="font-bold text-brand-800">
+                ${total.toFixed(2)}
+              </span>
+            </div>
+          )}
 
-          <input
-            name="address"
-            value={form.address}
-            onChange={handleChange}
-            placeholder="Address"
-            required
-            className="w-full p-2 border rounded"
-          />
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Full Name
+              </label>
+              <input
+                id="name"
+                name="name"
+                value={form.name}
+                onChange={handleChange}
+                placeholder="John Doe"
+                required
+                className="input-field"
+              />
+            </div>
 
-          <input
-            name="phone"
-            value={form.phone}
-            onChange={handleChange}
-            placeholder="Phone Number"
-            required
-            className="w-full p-2 border rounded"
-          />
+            <div>
+              <label htmlFor="address" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Delivery Address
+              </label>
+              <input
+                id="address"
+                name="address"
+                value={form.address}
+                onChange={handleChange}
+                placeholder="123 Main St, City"
+                required
+                className="input-field"
+              />
+            </div>
 
-          <select
-            name="payment_method"
-            value={form.payment_method}
-            onChange={handleChange}
-            className="w-full p-2 border rounded"
-          >
-            <option value="COD">Cash on Delivery</option>
-            <option value="ONLINE">Online Payment</option>
-          </select>
+            <div>
+              <label htmlFor="phone" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Phone Number
+              </label>
+              <input
+                id="phone"
+                name="phone"
+                value={form.phone}
+                onChange={handleChange}
+                placeholder="+1 234 567 8900"
+                required
+                className="input-field"
+              />
+            </div>
 
-          <button className="w-full bg-green-600 text-white py-2 rounded">
-            Place Order
-          </button>
-        </form>
+            <div>
+              <label htmlFor="payment_method" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Payment Method
+              </label>
+              <select
+                id="payment_method"
+                name="payment_method"
+                value={form.payment_method}
+                onChange={handleChange}
+                className="input-field"
+              >
+                <option value="COD">Cash on Delivery</option>
+                <option value="ONLINE">Online Payment</option>
+              </select>
+            </div>
+
+            <button
+              type="submit"
+              disabled={submitting}
+              className="btn-primary w-full !py-3"
+            >
+              {submitting ? "Placing Order..." : "Place Order"}
+            </button>
+          </form>
+        </div>
       </div>
-    </div>
+    </main>
   );
 }
 

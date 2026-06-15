@@ -1,50 +1,156 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 function Signup() {
   const BASE = import.meta.env.VITE_DJANGO_BASE_URL;
-  const [form, setForm] = useState({ username: "", email: "", password: "", password2: "" });
+  const [form, setForm] = useState({
+    username: "",
+    email: "",
+    password: "",
+    password2: "",
+  });
   const [msg, setMsg] = useState("");
+  const [loading, setLoading] = useState(false);
   const nav = useNavigate();
 
-  const handleChange = e => setForm({...form, [e.target.name]: e.target.value});
+  const handleChange = (e) =>
+    setForm({ ...form, [e.target.name]: e.target.value });
 
-  const handleSubmit = async e => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setMsg("");
+    setLoading(true);
     try {
       const res = await fetch(`${BASE}/api/register/`, {
         method: "POST",
-        headers: {"Content-Type":"application/json"},
-        body: JSON.stringify(form)
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(form),
       });
       const data = await res.json();
-      if(res.ok) {
-        setMsg("Account created. Redirecting to login...");
-        setTimeout(()=>nav("/login"), 1200);
+      if (res.ok) {
+        setMsg("Account created! Redirecting to login...");
+        setTimeout(() => nav("/login"), 1200);
       } else {
-        setMsg(data.username || data.password || JSON.stringify(data));
+        const errorText =
+          data.username?.[0] ||
+          data.password?.[0] ||
+          data.email?.[0] ||
+          "Signup failed. Please check your details.";
+        setMsg(errorText);
       }
-    } catch(err) {
+    } catch (err) {
       console.error(err);
-      setMsg("Signup failed");
+      setMsg("Signup failed. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
+  const isSuccess = msg.includes("created");
+
   return (
-    <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="max-w-md w-full bg-white p-6 rounded shadow">
-        <h2 className="text-2xl font-bold mb-4">Signup</h2>
-        <form onSubmit={handleSubmit} className="space-y-3">
-          <input name="username" onChange={handleChange} value={form.username} placeholder="Username" required className="w-full p-2 border rounded"/>
-          <input name="email" type="email" onChange={handleChange} value={form.email} placeholder="Email" className="w-full p-2 border rounded"/>
-          <input name="password" type="password" onChange={handleChange} value={form.password} placeholder="Password" required className="w-full p-2 border rounded"/>
-          <input name="password2" type="password" onChange={handleChange} value={form.password2} placeholder="Confirm Password" required className="w-full p-2 border rounded"/>
-          <button className="w-full bg-blue-600 text-white py-2 rounded">Create Account</button>
-        </form>
-        {msg && <p className="mt-3 text-sm">{msg}</p>}
+    <main className="page-main flex items-center justify-center px-4 pb-12">
+      <div className="w-full max-w-md">
+        <div className="mb-8 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-100 text-2xl">
+            🐝
+          </div>
+          <h1 className="text-2xl font-bold text-slate-900">Join ShopHive</h1>
+          <p className="mt-1 text-sm text-slate-500">
+            Create an account to start shopping
+          </p>
+        </div>
+
+        <div className="card p-6 sm:p-8">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label htmlFor="username" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Username
+              </label>
+              <input
+                id="username"
+                name="username"
+                onChange={handleChange}
+                value={form.username}
+                placeholder="Choose a username"
+                required
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Email
+              </label>
+              <input
+                id="email"
+                name="email"
+                type="email"
+                onChange={handleChange}
+                value={form.email}
+                placeholder="you@example.com"
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Password
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                onChange={handleChange}
+                value={form.password}
+                placeholder="Create a password"
+                required
+                className="input-field"
+              />
+            </div>
+            <div>
+              <label htmlFor="password2" className="mb-1.5 block text-sm font-medium text-slate-700">
+                Confirm Password
+              </label>
+              <input
+                id="password2"
+                name="password2"
+                type="password"
+                onChange={handleChange}
+                value={form.password2}
+                placeholder="Repeat your password"
+                required
+                className="input-field"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full !py-3"
+            >
+              {loading ? "Creating account..." : "Create Account"}
+            </button>
+          </form>
+
+          {msg && (
+            <p
+              className={`mt-4 rounded-lg px-3 py-2 text-center text-sm ${
+                isSuccess
+                  ? "bg-green-50 text-green-700"
+                  : "bg-red-50 text-red-600"
+              }`}
+            >
+              {msg}
+            </p>
+          )}
+
+          <p className="mt-6 text-center text-sm text-slate-500">
+            Already have an account?{" "}
+            <Link to="/login" className="font-semibold text-brand-700 hover:text-brand-800">
+              Sign in
+            </Link>
+          </p>
+        </div>
       </div>
-    </div>
+    </main>
   );
 }
 
