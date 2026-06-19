@@ -33,4 +33,5 @@ Thumbs.db
 *.log
 
 # Docker
-*.env.local
+*.env.locail
+*.tmp
