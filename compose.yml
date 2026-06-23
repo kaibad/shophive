@@ -24,6 +24,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: shophive-backend-dj
     container_name: django_backend
     restart: unless-stopped
     env_file:
@@ -37,7 +38,6 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
     volumes:
-      - ./backend:/app
       - static_volume:/app/staticfiles
       - media_volume:/app/media
     depends_on:

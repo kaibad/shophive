@@ -391,6 +391,173 @@ expose:
 
 ---
 
+## Another probelem is that after building the size of the image is not that small, so i decided to use distroless/hardened image.
+
+The core problem you started with: image size
+
+My current image is 299MB using python:3.13-slim with multi-stage builds. I already did the right things (multi-stage, slim base, non-root user, combining mutiple run commmands) but still ended up large because python:3.13-slim still carries a lot of Debian baggage — apt, dpkg, libc utilities, shells, and hundreds of packages which i will never use.
+
+**Why DHI fixes this**
+
+Docker Hardened Images are built from the ground up to contain only what's needed to run our app — no package manager, no shell, no extra system utilities. This directly attacks image size from the base layer up.
+
+The size comparison roughly looks like:
+
+python:3.13-slim ( current)~130MB base → 299MB final
+
+dhi.io/python:3.13-alpine3.21~20–30MB base → expected ~80–120MB final
+
+**Why we converted entrypoint.sh to entrypoint.py**
+
+The shell script requires /bin/sh to exist in the runtime image. But the whole point of DHI is that the runtime image has no shell — that's what makes it hardened and minimal. If we kept the .sh script, we'd be forced to use the -dev variant (which has a shell) as our runtime, and i'd lose most of the size and security benefit.
+
+By writing the entrypoint in Python, we can use the fully stripped-down DHI runtime because Python is the one thing our app actually needs.
+
+**The security angle**
+
+Smaller images also mean a smaller attack surface. No shell means an attacker who gets code execution inside your container can't just run sh or bash to poke around. Near-zero CVEs means your scanner (Trivy, Docker Scout, etc.) won't flag the base image with a wall of vulnerabilities. This matters when you're deploying to production or pitching DevOps work on a CV.
+
+**entrypoint.py**
+
+```python
+#!/usr/bin/env python3
+"""
+Django entrypoint — replaces entrypoint.sh
+Runs migrations, collectstatic, creates superuser, then execs gunicorn.
+"""
+import os
+import sys
+import subprocess
+
+def run(cmd):
+    """Run a manage.py command, exit on failure."""
+    result = subprocess.run([sys.executable, "manage.py"] + cmd)
+    if result.returncode != 0:
+        sys.exit(result.returncode)
+
+def main():
+    print("Starting Django backend...")
+
+    if os.environ.get("ENABLE_MIGRATE") == "true":
+        print("Running migrations...")
+        run(["migrate"])
+
+    if os.environ.get("ENABLE_COLLECTSTATIC") == "true":
+        print("Collecting static files...")
+        run(["collectstatic", "--noinput"])
+
+    username = os.environ.get("DJANGO_SUPERUSER_USERNAME")
+    if username:
+        print("Creating superuser...")
+        email = os.environ.get("DJANGO_SUPERUSER_EMAIL", "")
+        # --noinput reads DJANGO_SUPERUSER_PASSWORD from env automatically
+        subprocess.run(
+            [sys.executable, "manage.py", "createsuperuser",
+             "--noinput", "--username", username, "--email", email]
+        )
+        # Ignore non-zero exit (superuser may already exist)
+
+    if os.environ.get("ENABLE_SEED") == "true":          
+        print("Seeding database...")
+        run(["shell", "--command", "exec(open('seed.py').read())"])
+
+    print("Starting server...")
+    # exec() replaces this process entirely — PID 1 becomes gunicorn
+    # argv[1:] forwards whatever CMD passes in (e.g. gunicorn args)
+    args = sys.argv[1:]
+    if not args:
+        args = ["gunicorn", "backend.wsgi:application", "--bind", "0.0.0.0:8000"]
+
+    os.execvp(args[0], args)
+
+if __name__ == "__main__":
+    main()
+
+```
+
+```Dockerfile
+
+# ============================================================
+# Stage 1: Builder
+# ============================================================
+FROM dhi.io/python:3.13-alpine3.21-dev AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
+WORKDIR /app
+
+RUN python -m venv /app/venv
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ============================================================
+# Stage 2: Runtime — fully hardened, distroless-style
+# nonroot (UID 65532) by default
+# ca-certificates included
+# Near-zero CVEs
+# ============================================================
+FROM dhi.io/python:3.13-alpine3.21
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
+WORKDIR /app
+
+# Venv from builder (all deps, self-contained)
+COPY --from=builder /app/venv /app/venv
+
+# App source + Python entrypoint (no shell needed)
+COPY --chown=65532:65532 . .
+COPY --chown=65532:65532 entrypoint.py /entrypoint.py
+
+# Clean up any cached bytecode from the COPY
+RUN find /app -type f -name "*.pyc" -delete \
+    && find /app -type d -name "__pycache__" -delete
+
+USER 65532
+
+EXPOSE 8000
+
+# Python directly as PID 1 — no shell wrapper
+ENTRYPOINT ["python", "/entrypoint.py"]
+CMD ["gunicorn", "backend.wsgi:application", "--bind", "0.0.0.0:8000"]
+
+```
+
+- os.execvp(args[0], args) at the end is the Python equivalent of exec "$@" in your shell script — it replaces the current process rather than spawning a child, so gunicorn becomes PID 1 directly. This means signals (SIGTERM, SIGINT) go straight to gunicorn, which is correct behavior for containers.
+
+- sys.executable is used instead of hardcoding python3 — it always points to the exact Python binary that's running the entrypoint, so it correctly uses the venv's Python when calling manage.py.
+
+- The ENTRYPOINT ["python", "/entrypoint.py"] with CMD ["gunicorn", ...] means CMD args are forwarded as sys.argv[1:] into the entrypoint, same pattern as your old exec "$@".
+
+**What we did:**
+
+- Switched base image from python:3.13-slim to dhi.io/python:3.13-alpine3.21 (Docker Hardened Image)
+
+- Converted entrypoint.sh to entrypoint.py because DHI runtime has no shell (/bin/sh), so shell scripts can't run
+
+- Used venv pattern instead of copying /usr/local/lib and /usr/local/bin — cleaner and self-contained copy to runtime stage
+
+- Added ENABLE_SEED to entrypoint so database seeding is controlled via .env
+
+- Removed bind mount ./backend:/app from compose — it was overwriting the venv built inside the image at runtime
+
+
+**Why:**
+
+- Size — went from 299MB → 205MB by using a minimal hardened base
+
+- Security — no shell, no pip, no package manager in runtime = smaller attack surface, near-zero CVEs
+
+- DHI runtime has no shell — any RUN command or .sh script fails, so everything that needs a shell must happen in the builder stage
+
+- Bind mount was killing the container — Docker was mounting the empty host ./backend folder over /app, wiping the venv that was built inside the image, so gunicorn couldn't start → nginx got no response → 502
+
+---
+
 ## Troubleshooting
 
 The following errors were encountered during this setup. For root causes and fixes, see [TROUBLESHOOTING.md](./troubleshooting.md).

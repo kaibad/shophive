@@ -1,32 +1,37 @@
-# Build dependencies
-FROM python:3.13-slim AS builder
+# Stage 1: Builder
+FROM dhi.io/python:3.13-alpine3.21-dev AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+
+RUN python -m venv /app/venv
 COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Rutime image
-FROM python:3.13-slim
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-RUN apt-get update && apt-get upgrade -y \
-    && apt-get purge -y --auto-remove \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --no-create-home --shell /usr/sbin/nologin appuser
+# Stage 2: Runtime
+FROM dhi.io/python:3.13-alpine3.21
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
 WORKDIR /app
-COPY --from=builder /usr/local/lib/python3.13/site-packages/ /usr/local/lib/python3.13/site-packages/
-COPY --from=builder /usr/local/bin/ /usr/local/bin/
-COPY --chown=appuser:appuser . .
-COPY --chown=appuser:appuser entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh \
-    && find /app -type f -name "*.pyc" -delete \
-    && find /app -type d -name "__pycache__" -delete
-USER appuser
+
+# Venv from builder (all deps, self-contained)
+COPY --from=builder /app/venv /app/venv
+
+# App source + Python entrypoint (no shell needed)
+COPY --chown=65532:65532 . .
+COPY --chown=65532:65532 entrypoint.py /entrypoint.py
+
+USER 65532
+
 EXPOSE 8000
-ENTRYPOINT ["/entrypoint.sh"]
-#CMD ["python3", "manage.py", "runserver", "0.0.0.0:8000"]
+
+# Python directly as PID 1 — no shell wrapper
+ENTRYPOINT ["python", "/entrypoint.py"]
 CMD ["gunicorn", "backend.wsgi:application", "--bind", "0.0.0.0:8000"]
-
-
 
