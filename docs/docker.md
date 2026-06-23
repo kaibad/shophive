@@ -17,7 +17,13 @@ This document covers the full containerization of the backend application, inclu
 7. [Makefile](#makefile)
 8. [Architecture Overview](#architecture-overview)
 9. [Static Files and Gunicorn](#static-files-and-gunicorn)
-10. [Troubleshooting](#troubleshooting)
+11. [Hardened/Distroless Images](#hardeneddistroless-images)
+12. [Image Scanning and Pushing to Docker Hub](#image-scanning-and-pushing-to-docker-hub)
+13. [Push to Registry](#push-to-registry)
+14. [`.dockerignore`](#dockerignore)
+15. [Troubleshooting](#troubleshooting)
+
+
 
 ---
 
@@ -391,7 +397,9 @@ expose:
 
 ---
 
-## Another probelem is that after building the size of the image is not that small, so i decided to use distroless/hardened image.
+## Hardened/Distroless Images
+
+**Another probelem is that after building the size of the image is not that small, so i decided to use distroless/hardened image.**
 
 The core problem you started with: image size
 
@@ -582,6 +590,11 @@ docker login
 # Push
 docker push kailashbadu/shophive-backend:latest
 ```
+---
+## .dockerignore
+
+A .dockerignore file was missing in the previous setup. After adding it, the Docker image size was reduced by approximately 20 MB, resulting in a smaller and more efficient build.
+
 ---
 ## Troubleshooting
 
