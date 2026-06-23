@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment files — never in image
+.env
+.env.*
+
+# Dev/test artifacts
+*.log
+*.pot
+*.sqlite3
+db.sqlite3
+
+# Django collected static — generated at runtime
+staticfiles/
+
+# Media uploads — mounted as volume
+media/
+
+# Docker files — not needed inside image
+Dockerfile
+.dockerignore
+compose*.yml
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI/CD
+.github/
+
+# Docs
+README.md
+*.md
