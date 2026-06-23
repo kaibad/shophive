@@ -558,6 +558,31 @@ CMD ["gunicorn", "backend.wsgi:application", "--bind", "0.0.0.0:8000"]
 
 ---
 
+## Image Scanning and pushing to dockerhub
+
+**scan**
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image shophive-backend:latest
+```
+**add below in the backend/Dockerfile**
+```bash
+# remove pip
+pip uninstall pip -y    # remove pip from venv after installing deps
+```
+
+### Push to registry
+
+```bash
+# Tag with your Docker Hub username
+docker tag shophive-backend:latest kailashbadu/shophive-backend:latest
+
+# Login
+docker login
+
+# Push
+docker push kailashbadu/shophive-backend:latest
+```
+---
 ## Troubleshooting
 
 The following errors were encountered during this setup. For root causes and fixes, see [TROUBLESHOOTING.md](./troubleshooting.md).

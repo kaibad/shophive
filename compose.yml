@@ -24,7 +24,6 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    image: shophive-backend-dj
     container_name: django_backend
     restart: unless-stopped
     env_file:

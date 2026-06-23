@@ -9,7 +9,8 @@ WORKDIR /app
 
 RUN python -m venv /app/venv
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip uninstall pip -y  
 
 # Stage 2: Runtime
 FROM dhi.io/python:3.13-alpine3.21
