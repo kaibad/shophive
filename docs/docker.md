@@ -607,3 +607,297 @@ The following errors were encountered during this setup. For root causes and fix
 - PostgreSQL healthcheck always fails
 - Dockerfile changes not reflected after restart
 - Django admin loads without CSS after switching to Gunicorn
+
+---
+## Part 2: Dockerizing Frontend
+
+This section explains how to containerize the React (Vite) frontend application and integrate it with the Django backend using Docker Compose.
+
+The frontend setup uses:
+
+* **Node.js Alpine** image to build the React application
+* **Nginx Alpine** image to serve the production build
+* **Docker Compose** to connect frontend, backend, database, and Nginx services
+
+---
+
+### 1. Frontend Dockerfile
+
+The Dockerfile uses a multi-stage build:
+
+1. Build the React application using Node.js.
+2. Serve the generated static files using Nginx.
+
+```Dockerfile
+# =========================================
+# Stage 1: Build React (Vite) Application
+# =========================================
+ARG NODE_VERSION=24.14.0-alpine
+FROM node:${NODE_VERSION} AS builder
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY . .
+ARG VITE_DJANGO_BASE_URL
+RUN npm run build
+
+# =========================================
+# Stage 2: Serve with nginx
+# =========================================
+FROM nginx:alpine AS runner
+RUN rm -rf /usr/share/nginx/html/*
+COPY --from=builder /app/dist /usr/share/nginx/html
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+---
+
+### 2. Nginx Configuration
+
+Create:
+
+```
+nginx/default.conf
+```
+
+```nginx
+server {
+    listen 80;
+
+    location / {
+        proxy_pass http://frontend:80;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+**explanation**
+
+The Nginx container acts as the entry point.
+
+Traffic flow:
+
+```
+Browser
+   |
+   |
+   v
+Nginx :80
+   |
+   |
+   v
+React Frontend Container
+```
+
+The `proxy_pass` directive forwards requests to the frontend service.
+
+---
+
+### 3. Frontend Docker Compose Service
+
+```yaml
+frontend:
+  build:
+    context: ./frontend
+    dockerfile: Dockerfile
+    args:
+      VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+  container_name: react_frontend
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+  expose:
+    - "80"
+  depends_on:
+    - backend
+```
+
+---
+### Image Scanning and pushing to dockerhub
+
+**scan**
+```bash
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image shophive-frontend:latest
+```
+
+### Push to registry
+
+```bash
+# Tag with your Docker Hub username
+docker tag shophive-frontend:latest kailashbadu/shophive-frontend:latest
+
+# Login
+docker login
+
+# Push
+docker push kailashbadu/shophive-frontend:latest
+```
+
+
+##  Complete Docker Compose Configuration (Dev)
+
+The final `compose.yml` connects:
+
+* PostgreSQL database
+* Django backend
+* React frontend
+* Nginx reverse proxy
+
+```yaml
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dev_postgres
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL","pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  volume-init:
+    image: busybox
+    container_name: volume_init
+    user: root
+    command:
+      [
+        "sh",
+        "-c",
+        "chown -R 65532:65532 /app/media /app/staticfiles"
+      ]
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: django_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+    container_name: react_frontend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      VITE_DJANGO_BASE_URL:
+        ${VITE_DJANGO_BASE_URL}
+    expose:
+      - "80"
+    depends_on:
+      - backend
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "8000:8000"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    depends_on:
+      - frontend
+      - backend
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+```
+
+---
+
+## Application Architecture (Dev)
+
+After starting the containers:
+
+```
+                    Browser
+                       |
+                       |
+                       v
+                 Nginx Container
+                  Ports 80/8000
+                       |
+          -----------------------------
+          |                           |
+          v                           v
+
+ React Frontend                 Django Backend
+  nginx:alpine                  gunicorn/django
+
+                                      |
+                                      |
+                                      v
+
+                              PostgreSQL Database
+
+
+Static Files  ---> static_volume
+Media Files   ---> media_volume
+Database      ---> postgres_data
+```
+
+---
+
+## Accessing Services
+
+| Service        | URL                     |
+| -------------- | ----------------------- |
+| React Frontend | `http://localhost`      |
+| Django Backend | `http://localhost:8000` |
+| PostgreSQL     | `localhost:5432`        |
+
+---
+
+## Troubleshooting
+
+The following errors were encountered during this setup. For root causes and fixes, see [TROUBLESHOOTING.md](./troubleshooting.md).
+
+- `/entrypoint.sh: exec: python: not found`
+- `connection to server at "localhost", port 5432 failed`
+- `22 unapplied migration(s)`
+- Backend starts before PostgreSQL is ready
+- PostgreSQL healthcheck always fails
+- Dockerfile changes not reflected after restart
+- Django admin loads without CSS after switching to Gunicorn
+- Permission Denied on Docker Volume (`/app/media`, `/app/staticfiles`)
+- React Frontend Refresh 404 Error (Docker + Nginx)
