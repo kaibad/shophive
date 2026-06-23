@@ -16,3 +16,8 @@ logs:
 build:
 	docker compose down && docker compose build --no-cache && docker compose up -d
 
+vprune:
+	docker volume prune -a
+
+sprune:
+	docker system prune -a
