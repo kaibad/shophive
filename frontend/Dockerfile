@@ -9,6 +9,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY . .
 ARG VITE_DJANGO_BASE_URL
+ENV VITE_DJANGO_BASE_URL=${VITE_DJANGO_BASE_URL}
 RUN npm run build
 
 # =========================================

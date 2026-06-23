@@ -901,3 +901,484 @@ The following errors were encountered during this setup. For root causes and fix
 - Django admin loads without CSS after switching to Gunicorn
 - Permission Denied on Docker Volume (`/app/media`, `/app/staticfiles`)
 - React Frontend Refresh 404 Error (Docker + Nginx)
+
+
+---
+
+# Production Deployment
+
+This document covers deploying ShopHive to a production server (AWS EC2) using pre-built Docker images from Docker Hub.
+
+---
+
+## Architecture Overview
+
+```
+Browser
+   |
+   | :80 (frontend + API)
+   | :8000 (backend API direct)
+   v
+Nginx (reverse proxy)
+   |
+   |-- /api/*      --> Django Backend (internal :8000)
+   |-- /admin/*    --> Django Backend (internal :8000)
+   |-- /static/*   --> static_volume (served directly)
+   |-- /media/*    --> media_volume (served directly)
+   |-- /*          --> React Frontend (internal :80)
+         |
+         v
+   React Frontend Container
+         |
+         v (relative /api/* calls)
+   Django Backend (Gunicorn)
+         |
+         v
+   PostgreSQL Database
+```
+
+Key decisions:
+- Nginx is the single public entry point on ports 80 and 8000.
+- The frontend calls `/api/...` as a relative URL — no hardcoded IP or port.
+- Nginx on port 80 proxies `/api/`, `/admin/`, `/media/`, `/static/` to the backend and serves everything else from the React container.
+- Backend and frontend containers are never directly exposed to the internet.
+
+---
+
+## Server Setup
+
+### Requirements
+
+- Ubuntu 22.04 or later
+- Docker and Docker Compose installed
+- Port 80 and 8000 open in the EC2 security group inbound rules
+
+### Install Docker on EC2
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin
+sudo usermod -aG docker ubuntu
+newgrp docker
+```
+
+---
+
+## Project Structure on Server
+
+Only three things are needed on the server — no source code required:
+
+```
+~/app/
+├── compose.yml
+├── .env
+└── nginx/
+    └── default.conf
+```
+
+Images are pulled from Docker Hub at deploy time.
+
+---
+
+## Environment Configuration
+
+`.env` on the production server:
+
+```env
+# Django
+SECRET_KEY=your-production-secret-key
+DEBUG=False
+DB_NAME=ecommerce_db
+DB_USER=ecommerce_user
+DB_PASSWORD=strongpassword
+DB_HOST=postgres
+DB_PORT=5432
+
+# Startup flags
+ENABLE_MIGRATE=true
+ENABLE_COLLECTSTATIC=true
+ENABLE_SEED=false
+DJANGO_SUPERUSER_USERNAME=admin
+DJANGO_SUPERUSER_EMAIL=admin@example.com
+DJANGO_SUPERUSER_PASSWORD=strongadminpassword
+
+# CORS / CSRF
+CSRF_TRUSTED_ORIGINS=http://<your-server-ip>,http://<your-server-ip>:8000
+
+# Frontend — empty string so frontend uses relative URLs
+VITE_DJANGO_BASE_URL=
+```
+
+> **Note:** `VITE_DJANGO_BASE_URL` must be empty. The frontend uses relative
+> API calls (`/api/...`) which nginx proxies to the backend. Hardcoding an IP
+> here has no effect at runtime since Vite bakes this value into the JS bundle
+> at build time — it must be set correctly when the image is built locally,
+> not on the server.
+
+---
+
+## Nginx Configuration
+
+`nginx/default.conf` handles all routing for both ports:
+
+```nginx
+# ── Backend API (port 8000) ───────────────────────────────────
+server {
+    listen 8000;
+
+    location /static/ {
+        alias /app/staticfiles/;
+    }
+
+    location /media/ {
+        alias /app/media/;
+    }
+
+    location / {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# ── Frontend + API proxy (port 80) ───────────────────────────
+server {
+    listen 80;
+
+    # API calls from React frontend
+    location /api/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Django admin
+    location /admin/ {
+        proxy_pass http://backend:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Media files uploaded by users/seeder
+    location /media/ {
+        alias /app/media/;
+    }
+
+    # Django collected static files
+    location /static/ {
+        alias /app/staticfiles/;
+    }
+
+    # Everything else → React SPA
+    location / {
+        proxy_pass http://frontend:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+> **Why `/media/` on port 80?**
+> The React frontend fetches product images via relative paths (`/media/...`).
+> Without this block on port 80, nginx would forward those requests to the
+> React container which has no media files — resulting in broken images.
+> The `alias` directive serves files directly from the shared `media_volume`.
+
+---
+
+## Docker Compose
+
+`compose.yml` on the production server uses pre-built images from Docker Hub:
+
+```yaml
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: dev_postgres
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  volume-init:
+    image: busybox
+    container_name: volume_init
+    user: root
+    command:
+      ["sh", "-c", "chown -R 65532:65532 /app/media /app/staticfiles"]
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+
+  backend:
+    image: kailashbadu/shophive-backend:v0.0.1
+    container_name: django_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: postgres
+      DB_PORT: 5432
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
+
+  frontend:
+    image: kailashbadu/shophive-frontend:v0.0.2
+    container_name: react_frontend
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "8000:8000"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+```
+
+---
+
+## Building and Pushing Images
+
+Run these commands on your **local development machine** before deploying.
+
+### Backend
+
+```bash
+docker build -t kailashbadu/shophive-backend:v0.0.1 ./backend
+docker push kailashbadu/shophive-backend:v0.0.1
+```
+
+### Frontend
+
+The frontend image must be built with `VITE_DJANGO_BASE_URL` set to an empty
+string so the JS bundle uses relative API calls:
+
+```bash
+docker build \
+  --no-cache \
+  --build-arg VITE_DJANGO_BASE_URL= \
+  -t kailashbadu/shophive-frontend:v0.0.2 \
+  ./frontend
+
+# Verify no localhost:8000 is baked in — should print 0
+docker run --rm kailashbadu/shophive-frontend:v0.0.2 \
+  grep -c "localhost:8000" /usr/share/nginx/html/assets/*.js
+
+docker push kailashbadu/shophive-frontend:v0.0.2
+```
+
+> **Always verify before pushing.** The JS bundle is immutable after build.
+> If the wrong URL is baked in, the only fix is a rebuild and push.
+
+### Bumping the tag
+
+Always increment the image tag when pushing a new build:
+
+```
+v0.0.1 → v0.0.2 → v0.0.3 ...
+```
+
+Docker will not re-pull an image if the tag already exists locally. A new tag
+guarantees the server pulls the correct updated image.
+
+---
+
+## Deploying on EC2
+
+### First deploy
+
+```bash
+# SSH into EC2
+ssh -i your-key.pem ubuntu@<your-server-ip>
+
+# Create app directory
+mkdir ~/app && cd ~/app
+
+# Create nginx config directory
+mkdir nginx
+
+# Copy or create compose.yml, .env, nginx/default.conf
+# (see sections above for content)
+
+# Pull and start all services
+docker compose up -d
+```
+
+### Updating frontend image
+
+```bash
+# Update image tag in compose.yml, then:
+docker compose pull frontend
+docker compose up -d --force-recreate frontend
+```
+
+### Updating nginx config
+
+Since `nginx/default.conf` is a volume mount, no rebuild is needed:
+
+```bash
+sudo vim nginx/default.conf
+docker compose restart nginx
+```
+
+### Updating backend image
+
+```bash
+docker compose pull backend
+docker compose up -d --force-recreate backend
+```
+
+### Full redeploy
+
+```bash
+docker compose down
+docker rmi kailashbadu/shophive-frontend:v0.0.2 \
+           kailashbadu/shophive-backend:v0.0.1 --force
+docker compose up -d
+```
+
+---
+
+## Accessing Services
+
+| Service          | URL                          |
+|------------------|------------------------------|
+| React Frontend   | `http://<server-ip>`         |
+| Django API       | `http://<server-ip>/api/`    |
+| Django Admin     | `http://<server-ip>/admin/`  |
+| Backend (direct) | `http://<server-ip>:8000`    |
+
+---
+
+## Troubleshooting
+
+### CORS error — `localhost:8000` in browser console
+
+**Cause:** Frontend image was built without passing `VITE_DJANGO_BASE_URL=`
+as a build arg, or with a hardcoded IP. The JS bundle has `localhost:8000`
+baked in.
+
+**Fix:** Rebuild the frontend image with an empty build arg and push a new tag:
+
+```bash
+docker build --no-cache \
+  --build-arg VITE_DJANGO_BASE_URL= \
+  -t kailashbadu/shophive-frontend:v0.0.3 \
+  ./frontend
+docker push kailashbadu/shophive-frontend:v0.0.3
+```
+
+Update the tag in `compose.yml` and redeploy.
+
+---
+
+### Broken product images — media files not loading on frontend
+
+**Cause:** The port 80 nginx server block was missing a `/media/` location,
+so image requests went to the React container instead of the media volume.
+
+**Fix:** Add to the port 80 server block in `nginx/default.conf`:
+
+```nginx
+location /media/ {
+    alias /app/media/;
+}
+```
+
+Then restart nginx:
+
+```bash
+docker compose restart nginx
+```
+
+---
+
+### 502 Bad Gateway on backend
+
+**Cause:** Backend container crashed or hasn't started yet.
+
+**Fix:**
+
+```bash
+docker compose logs backend
+docker compose restart backend
+```
+
+---
+
+### Permission denied on `/app/media` or `/app/staticfiles`
+
+**Cause:** Docker named volumes are created as root-owned. The backend runs
+as user `65532` (DHI nonroot) and cannot write to root-owned directories.
+
+**Fix:** The `volume-init` service handles this by running `chown` as root
+before the backend starts. If it still fails, recreate the volumes:
+
+```bash
+docker compose down
+docker volume rm shophive_media_volume shophive_static_volume
+docker compose up -d
+```
+
+---
+
+### Docker pulls old image despite pushing a new build
+
+**Cause:** Same image tag already exists locally. Docker skips the pull.
+
+**Fix:** Delete the local image and pull fresh:
+
+```bash
+docker rmi kailashbadu/shophive-frontend:v0.0.2 --force
+docker compose up -d
+```
+
+Or always bump the tag on every new build.
+
+
