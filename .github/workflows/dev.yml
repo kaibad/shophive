@@ -2,7 +2,7 @@ name: Development pipeline
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
 
 env:
   BACKEND_IMAGE: kailashbadu/shophive-backend
