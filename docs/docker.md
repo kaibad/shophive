@@ -1337,6 +1337,86 @@ Then restart nginx:
 docker compose restart nginx
 ```
 
+### Vite Env Issue
+
+Vite `VITE_*` variables are build-time only.
+
+`environment:` in Docker Compose does not update an already built React image.
+
+The value is injected during:
+
+```bash
+npm run build
+```
+and stored inside the generated JS files.
+
+When building frontend images in CI/CD, always pass the correct value
+
+```bash
+docker build --build-arg VITE_DJANGO_BASE_URL=<production-url> .
+```
+Runtime env changes will not affect the built frontend.
+
+No need to panic if this happens — the issue was not with the code or deployment. The Docker image used in EC2 was built locally with the local environment value, so the frontend still had the local URL inside its built files. Rebuilding the image with the production value will fix it.
+
+The reason it worked with this command:
+
+```bash
+docker build \
+  --no-cache \
+  --build-arg VITE_DJANGO_BASE_URL= \
+  -t kailashbadu/shophive-frontend:v0.0.2 \
+  ./frontend
+```
+is because i was  passing an empty value.
+
+my frontend code:
+
+```javascript
+const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
+```
+
+gets built as: `const BASEURL = "";`
+
+Then  API calls become: `fetch(`${BASEURL}/api/products/`)`
+
+which becomes: `fetch("/api/products/")`
+
+This is a relative URL.
+
+Now the browser sends the request to the same origin where the frontend is loaded:
+
+http://ec2-ip.com/api/products/
+
+Then nginx handles it:
+
+```bash
+Browser
+   |
+   v
+nginx :80
+   |
+   +--> frontend
+   |
+   +--> backend (/api)
+
+```
+
+So it works because nginx is acting as the reverse proxy.
+
+Previously, we built with:
+```
+--build-arg VITE_DJANGO_BASE_URL=http://localhost:8000
+```
+
+our bundle contained: `const BASEURL = "http://localhost:8000";`
+
+The browser then called:
+
+http://localhost:8000/api/products/
+
+but localhost refers to the user's machine, not EC2 server.
+
 ---
 
 ### 502 Bad Gateway on backend
