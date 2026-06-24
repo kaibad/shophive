@@ -9,14 +9,13 @@ env:
   FRONTEND_IMAGE: kailashbadu/shophive-frontend
 
 jobs:
-
   # SECRET SCANNING
   gitleaks:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo for gitleaks
+      - name: Checkout repo
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
