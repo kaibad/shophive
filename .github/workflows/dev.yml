@@ -119,9 +119,9 @@ jobs:
 
   
   build:
-    name: Build DockeR Image
+    name: Build Docker Image and push to doker hub
     runs-on: ubuntu-latest
-    environment: deveploment
+    environment: deveplopment
     needs:
       - sast
       - dependency-scan
