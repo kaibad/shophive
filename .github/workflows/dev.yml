@@ -206,7 +206,19 @@ jobs:
           retentiom-days: 7
 
   Deploy:
-    name: Deployment to the Deveploment Server
+    name: Deployment to the Development Server
+    runs-on: ubuntu-latest
+    needs:
+      - trivy-image
+    environment: development
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Deploy application
+        run: |
+          echo "Deploying to development server"
 
 
             
