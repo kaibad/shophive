@@ -115,13 +115,13 @@ jobs:
         with:
           name: trivy-fs-report-dev
           path: trivy-fs-results.txt
-          retentiom-days: 7
+          retention-days: 7
 
   
   build:
     name: Build Docker Image and push to doker hub
     runs-on: ubuntu-latest
-    environment: deveplopment
+    environment: development
     needs:
       - sast
       - dependency-scan
@@ -179,7 +179,7 @@ jobs:
         uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
           format: table
           severity: HIGH,CRITICAL
           exit-code: 0
@@ -189,7 +189,7 @@ jobs:
         uses: aquaswcurity/trivy-action@0.36.0
         with:
           scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
           format: table
           severity: HIGH,CRITICAL
           exit-code: 0
@@ -203,7 +203,7 @@ jobs:
           path: |
             trivy-backend-image.txt
             trivy-frontend-image.txt
-          retentiom-days: 7
+          retention-days: 7
 
   Deploy:
     name: Deployment to the Development Server
