@@ -47,7 +47,7 @@ function Home() {
                   </span>
                 </div>
                 <h1 className="text-3xl font-extrabold leading-tight tracking-tight text-brand-900 sm:text-4xl lg:text-[2.75rem]">
-                  Gadgets you&apos;ll love.
+                  Gadgets you&apos;ll enjoy.
                   <br />
                   Prices you&apos;ll trust.
                 </h1>
