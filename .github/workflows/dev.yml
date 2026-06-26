@@ -186,7 +186,7 @@ jobs:
           output: trivy-backend-image.txt
 
       - name: Scan Frontend Image
-        uses: aquaswcurity/trivy-action@0.36.0
+        uses: aquasecurity/trivy-action@0.36.0
         with:
           scan-type: image
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
