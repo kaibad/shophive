@@ -1,10 +1,10 @@
 import { useCart } from "../context/CartContext";
 import { Link } from "react-router-dom";
 import EmptyState from "../components/EmptyState";
+import BASEURL from "../config.js";
 
 function CartPage() {
   const { cartItems, total, removeFromCart, updateQuantity } = useCart();
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 
   return (
     <main className="page-main px-4 pb-12 sm:px-6 lg:px-8">
@@ -23,7 +23,7 @@ function CartPage() {
             icon="🛒"
             title="Your cart is empty"
             description="Browse our products and add something you like."
-              action={
+            action={
               <Link to="/shop" className="btn-primary">
                 Continue Shopping
               </Link>

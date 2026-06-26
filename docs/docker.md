@@ -17,13 +17,11 @@ This document covers the full containerization of the backend application, inclu
 7. [Makefile](#makefile)
 8. [Architecture Overview](#architecture-overview)
 9. [Static Files and Gunicorn](#static-files-and-gunicorn)
-11. [Hardened/Distroless Images](#hardeneddistroless-images)
-12. [Image Scanning and Pushing to Docker Hub](#image-scanning-and-pushing-to-docker-hub)
-13. [Push to Registry](#push-to-registry)
-14. [`.dockerignore`](#dockerignore)
-15. [Troubleshooting](#troubleshooting)
-
-
+10. [Hardened/Distroless Images](#hardeneddistroless-images)
+11. [Image Scanning and Pushing to Docker Hub](#image-scanning-and-pushing-to-docker-hub)
+12. [Push to Registry](#push-to-registry)
+13. [`.dockerignore`](#dockerignore)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -51,7 +49,7 @@ All environment variables are stored in a single `.env` file at the project root
 
 ```env
 # Django
-SECRET_KEY=your-secret-key
+SECRET_KEY=our-secret-key
 DEBUG=True
 
 # Database
@@ -68,10 +66,9 @@ ENABLE_COLLECTSTATIC=true
 DJANGO_SUPERUSER_USERNAME=admin
 DJANGO_SUPERUSER_EMAIL=admin@example.com
 DJANGO_SUPERUSER_PASSWORD=admin
-
 ```
 
-**Why root-level `.env`?**
+**Why a root-level `.env`?**
 
 Docker Compose automatically reads `.env` from the same directory as `compose.yml`. Placing it at the root means:
 
@@ -399,38 +396,37 @@ expose:
 
 ## Hardened/Distroless Images
 
-**Another probelem is that after building the size of the image is not that small, so i decided to use distroless/hardened image.**
+**Problem: image size after build is too large.**
 
-The core problem you started with: image size
+The core issue: the current image is 299 MB using `python:3.13-slim` with multi-stage builds. The right steps were already taken (multi-stage, slim base, non-root user, combining multiple `RUN` commands) but the image is still large because `python:3.13-slim` carries a lot of Debian baggage — `apt`, `dpkg`, `libc` utilities, shells, and hundreds of packages that are never used at runtime.
 
-My current image is 299MB using python:3.13-slim with multi-stage builds. I already did the right things (multi-stage, slim base, non-root user, combining mutiple run commmands) but still ended up large because python:3.13-slim still carries a lot of Debian baggage — apt, dpkg, libc utilities, shells, and hundreds of packages which i will never use.
+### Why DHI fixes this
 
-**Why DHI fixes this**
+Docker Hardened Images are built from the ground up to contain only what is needed to run the application — no package manager, no shell, no extra system utilities. This directly attacks image size from the base layer up.
 
-Docker Hardened Images are built from the ground up to contain only what's needed to run our app — no package manager, no shell, no extra system utilities. This directly attacks image size from the base layer up.
+Approximate size comparison:
 
-The size comparison roughly looks like:
+| Base Image | Base Size | Final Size |
+|---|---|---|
+| `python:3.13-slim` (current) | ~130 MB | 299 MB |
+| `dhi.io/python:3.13-alpine3.21` | ~20–30 MB | ~80–120 MB |
 
-python:3.13-slim ( current)~130MB base → 299MB final
+### Why `entrypoint.sh` was converted to `entrypoint.py`
 
-dhi.io/python:3.13-alpine3.21~20–30MB base → expected ~80–120MB final
+The shell script requires `/bin/sh` to exist in the runtime image. But the whole point of DHI is that the runtime image has no shell — that is what makes it hardened and minimal. Keeping the `.sh` script would force use of the `-dev` variant (which has a shell) as the runtime, losing most of the size and security benefit.
 
-**Why we converted entrypoint.sh to entrypoint.py**
+By writing the entrypoint in Python, the fully stripped-down DHI runtime can be used, because Python is the one thing the application actually needs.
 
-The shell script requires /bin/sh to exist in the runtime image. But the whole point of DHI is that the runtime image has no shell — that's what makes it hardened and minimal. If we kept the .sh script, we'd be forced to use the -dev variant (which has a shell) as our runtime, and i'd lose most of the size and security benefit.
+### The security angle
 
-By writing the entrypoint in Python, we can use the fully stripped-down DHI runtime because Python is the one thing our app actually needs.
+Smaller images mean a smaller attack surface. No shell means an attacker who gains code execution inside the container cannot simply run `sh` or `bash` to explore. Near-zero CVEs means scanners (Trivy, Docker Scout, etc.) will not flag the base image with a wall of vulnerabilities. This matters when deploying to production.
 
-**The security angle**
-
-Smaller images also mean a smaller attack surface. No shell means an attacker who gets code execution inside your container can't just run sh or bash to poke around. Near-zero CVEs means your scanner (Trivy, Docker Scout, etc.) won't flag the base image with a wall of vulnerabilities. This matters when you're deploying to production or pitching DevOps work on a CV.
-
-**entrypoint.py**
+### `entrypoint.py`
 
 ```python
 #!/usr/bin/env python3
 """
-Django entrypoint — replaces entrypoint.sh
+Django entrypoint — replaces entrypoint.sh.
 Runs migrations, collectstatic, creates superuser, then execs gunicorn.
 """
 import os
@@ -465,12 +461,12 @@ def main():
         )
         # Ignore non-zero exit (superuser may already exist)
 
-    if os.environ.get("ENABLE_SEED") == "true":          
+    if os.environ.get("ENABLE_SEED") == "true":
         print("Seeding database...")
         run(["shell", "--command", "exec(open('seed.py').read())"])
 
     print("Starting server...")
-    # exec() replaces this process entirely — PID 1 becomes gunicorn
+    # os.execvp() replaces this process entirely — PID 1 becomes gunicorn
     # argv[1:] forwards whatever CMD passes in (e.g. gunicorn args)
     args = sys.argv[1:]
     if not args:
@@ -480,11 +476,11 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 ```
 
-```Dockerfile
+### Hardened Dockerfile
 
+```dockerfile
 # ============================================================
 # Stage 1: Builder
 # ============================================================
@@ -532,56 +528,49 @@ EXPOSE 8000
 # Python directly as PID 1 — no shell wrapper
 ENTRYPOINT ["python", "/entrypoint.py"]
 CMD ["gunicorn", "backend.wsgi:application", "--bind", "0.0.0.0:8000"]
-
 ```
 
-- os.execvp(args[0], args) at the end is the Python equivalent of exec "$@" in your shell script — it replaces the current process rather than spawning a child, so gunicorn becomes PID 1 directly. This means signals (SIGTERM, SIGINT) go straight to gunicorn, which is correct behavior for containers.
+Key notes:
 
-- sys.executable is used instead of hardcoding python3 — it always points to the exact Python binary that's running the entrypoint, so it correctly uses the venv's Python when calling manage.py.
+- `os.execvp(args[0], args)` at the end is the Python equivalent of `exec "$@"` in a shell script — it replaces the current process rather than spawning a child, so gunicorn becomes PID 1 directly. This means signals (`SIGTERM`, `SIGINT`) go straight to gunicorn, which is correct behaviour for containers.
+- `sys.executable` is used instead of hardcoding `python3` — it always points to the exact Python binary running the entrypoint, so it correctly uses the venv's Python when calling `manage.py`.
+- The `ENTRYPOINT ["python", "/entrypoint.py"]` with `CMD ["gunicorn", ...]` means CMD args are forwarded as `sys.argv[1:]` into the entrypoint, following the same pattern as the old `exec "$@"`.
 
-- The ENTRYPOINT ["python", "/entrypoint.py"] with CMD ["gunicorn", ...] means CMD args are forwarded as sys.argv[1:] into the entrypoint, same pattern as your old exec "$@".
+### What changed
 
-**What we did:**
+- Switched base image from `python:3.13-slim` to `dhi.io/python:3.13-alpine3.21` (Docker Hardened Image).
+- Converted `entrypoint.sh` to `entrypoint.py` because the DHI runtime has no shell (`/bin/sh`), so shell scripts cannot run.
+- Used the `venv` pattern instead of copying `/usr/local/lib` and `/usr/local/bin` — cleaner and self-contained copy to the runtime stage.
+- Added `ENABLE_SEED` to the entrypoint so database seeding is controlled via `.env`.
+- Removed the `./backend:/app` bind mount from Compose — it was overwriting the venv built inside the image at runtime.
 
-- Switched base image from python:3.13-slim to dhi.io/python:3.13-alpine3.21 (Docker Hardened Image)
+### Why
 
-- Converted entrypoint.sh to entrypoint.py because DHI runtime has no shell (/bin/sh), so shell scripts can't run
-
-- Used venv pattern instead of copying /usr/local/lib and /usr/local/bin — cleaner and self-contained copy to runtime stage
-
-- Added ENABLE_SEED to entrypoint so database seeding is controlled via .env
-
-- Removed bind mount ./backend:/app from compose — it was overwriting the venv built inside the image at runtime
-
-
-**Why:**
-
-- Size — went from 299MB → 205MB by using a minimal hardened base
-
-- Security — no shell, no pip, no package manager in runtime = smaller attack surface, near-zero CVEs
-
-- DHI runtime has no shell — any RUN command or .sh script fails, so everything that needs a shell must happen in the builder stage
-
-- Bind mount was killing the container — Docker was mounting the empty host ./backend folder over /app, wiping the venv that was built inside the image, so gunicorn couldn't start → nginx got no response → 502
+- **Size** — went from 299 MB → 205 MB by using a minimal hardened base.
+- **Security** — no shell, no pip, no package manager in runtime = smaller attack surface, near-zero CVEs.
+- The DHI runtime has no shell — any `RUN` command or `.sh` script will fail, so everything that needs a shell must happen in the builder stage.
+- The bind mount was causing the container to fail — Docker was mounting the empty host `./backend` folder over `/app`, wiping the venv built inside the image, so gunicorn couldn't start → nginx got no response → 502.
 
 ---
 
-## Image Scanning and pushing to dockerhub
+## Image Scanning and Pushing to Docker Hub
 
-**scan**
+### Scan
+
 ```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image shophive-backend:latest
 ```
-**add below in the backend/Dockerfile**
-```bash
-# remove pip
-pip uninstall pip -y    # remove pip from venv after installing deps
+
+Add the following to `backend/Dockerfile` to remove pip from the venv after installing dependencies:
+
+```dockerfile
+RUN pip uninstall pip -y
 ```
 
-### Push to registry
+### Push to Registry
 
 ```bash
-# Tag with your Docker Hub username
+# Tag with our Docker Hub username
 docker tag shophive-backend:latest kailashbadu/shophive-backend:latest
 
 # Login
@@ -590,12 +579,15 @@ docker login
 # Push
 docker push kailashbadu/shophive-backend:latest
 ```
----
-## .dockerignore
-
-A .dockerignore file was missing in the previous setup. After adding it, the Docker image size was reduced by approximately 20 MB, resulting in a smaller and more efficient build.
 
 ---
+
+## `.dockerignore`
+
+A `.dockerignore` file was missing in the previous setup. After adding it, the Docker image size was reduced by approximately 20 MB, resulting in a smaller and more efficient build.
+
+---
+
 ## Troubleshooting
 
 The following errors were encountered during this setup. For root causes and fixes, see [TROUBLESHOOTING.md](./troubleshooting.md).
@@ -609,15 +601,16 @@ The following errors were encountered during this setup. For root causes and fix
 - Django admin loads without CSS after switching to Gunicorn
 
 ---
-## Part 2: Dockerizing Frontend
+
+## Part 2: Dockerizing the Frontend
 
 This section explains how to containerize the React (Vite) frontend application and integrate it with the Django backend using Docker Compose.
 
 The frontend setup uses:
 
-* **Node.js Alpine** image to build the React application
-* **Nginx Alpine** image to serve the production build
-* **Docker Compose** to connect frontend, backend, database, and Nginx services
+- **Node.js Alpine** image to build the React application.
+- **Nginx Alpine** image to serve the production build.
+- **Docker Compose** to connect the frontend, backend, database, and Nginx services.
 
 ---
 
@@ -628,7 +621,7 @@ The Dockerfile uses a multi-stage build:
 1. Build the React application using Node.js.
 2. Serve the generated static files using Nginx.
 
-```Dockerfile
+```dockerfile
 # =========================================
 # Stage 1: Build React (Vite) Application
 # =========================================
@@ -642,7 +635,7 @@ ARG VITE_DJANGO_BASE_URL
 RUN npm run build
 
 # =========================================
-# Stage 2: Serve with nginx
+# Stage 2: Serve with Nginx
 # =========================================
 FROM nginx:alpine AS runner
 RUN rm -rf /usr/share/nginx/html/*
@@ -650,15 +643,12 @@ COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
 ```
+
 ---
 
 ### 2. Nginx Configuration
 
-Create:
-
-```
-nginx/default.conf
-```
+Create `nginx/default.conf`:
 
 ```nginx
 server {
@@ -672,11 +662,10 @@ server {
     }
 }
 ```
-**explanation**
 
-The Nginx container acts as the entry point.
+**Explanation:**
 
-Traffic flow:
+The Nginx container acts as the entry point. Traffic flow:
 
 ```
 Browser
@@ -716,17 +705,19 @@ frontend:
 ```
 
 ---
-### Image Scanning and pushing to dockerhub
 
-**scan**
+### Image Scanning and Pushing to Docker Hub
+
+**Scan:**
+
 ```bash
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image shophive-frontend:latest
 ```
 
-### Push to registry
+**Push to registry:**
 
 ```bash
-# Tag with your Docker Hub username
+# Tag with our Docker Hub username
 docker tag shophive-frontend:latest kailashbadu/shophive-frontend:latest
 
 # Login
@@ -736,15 +727,16 @@ docker login
 docker push kailashbadu/shophive-frontend:latest
 ```
 
+---
 
-##  Complete Docker Compose Configuration (Dev)
+## Complete Docker Compose Configuration (Dev)
 
 The final `compose.yml` connects:
 
-* PostgreSQL database
-* Django backend
-* React frontend
-* Nginx reverse proxy
+- PostgreSQL database
+- Django backend
+- React frontend
+- Nginx reverse proxy
 
 ```yaml
 services:
@@ -763,7 +755,7 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -782,6 +774,7 @@ services:
     volumes:
       - static_volume:/app/staticfiles
       - media_volume:/app/media
+
   backend:
     build:
       context: ./backend
@@ -808,6 +801,7 @@ services:
         condition: service_completed_successfully
     expose:
       - "8000"
+
   frontend:
     build:
       context: ./frontend
@@ -819,12 +813,12 @@ services:
     env_file:
       - .env
     environment:
-      VITE_DJANGO_BASE_URL:
-        ${VITE_DJANGO_BASE_URL}
+      VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
     expose:
       - "80"
     depends_on:
       - backend
+
   nginx:
     image: nginx:alpine
     ports:
@@ -837,6 +831,7 @@ services:
     depends_on:
       - frontend
       - backend
+
 volumes:
   postgres_data:
   static_volume:
@@ -899,15 +894,14 @@ The following errors were encountered during this setup. For root causes and fix
 - PostgreSQL healthcheck always fails
 - Dockerfile changes not reflected after restart
 - Django admin loads without CSS after switching to Gunicorn
-- Permission Denied on Docker Volume (`/app/media`, `/app/staticfiles`)
-- React Frontend Refresh 404 Error (Docker + Nginx)
-
+- Permission denied on Docker volume (`/app/media`, `/app/staticfiles`)
+- React frontend refresh 404 error (Docker + Nginx)
 
 ---
 
 # Production Deployment
 
-This document covers deploying ShopHive to a production server (AWS EC2) using pre-built Docker images from Docker Hub.
+This section covers deploying ShopHive to a production server (AWS EC2) using pre-built Docker images from Docker Hub.
 
 ---
 
@@ -938,9 +932,10 @@ Nginx (reverse proxy)
 ```
 
 Key decisions:
+
 - Nginx is the single public entry point on ports 80 and 8000.
 - The frontend calls `/api/...` as a relative URL — no hardcoded IP or port.
-- Nginx on port 80 proxies `/api/`, `/admin/`, `/media/`, `/static/` to the backend and serves everything else from the React container.
+- Nginx on port 80 proxies `/api/`, `/admin/`, `/media/`, and `/static/` to the backend and serves everything else from the React container.
 - Backend and frontend containers are never directly exposed to the internet.
 
 ---
@@ -951,7 +946,7 @@ Key decisions:
 
 - Ubuntu 22.04 or later
 - Docker and Docker Compose installed
-- Port 80 and 8000 open in the EC2 security group inbound rules
+- Ports 80 and 8000 open in the EC2 security group inbound rules
 
 ### Install Docker on EC2
 
@@ -986,7 +981,7 @@ Images are pulled from Docker Hub at deploy time.
 
 ```env
 # Django
-SECRET_KEY=your-production-secret-key
+SECRET_KEY=our-production-secret-key
 DEBUG=False
 DB_NAME=ecommerce_db
 DB_USER=ecommerce_user
@@ -1003,17 +998,13 @@ DJANGO_SUPERUSER_EMAIL=admin@example.com
 DJANGO_SUPERUSER_PASSWORD=strongadminpassword
 
 # CORS / CSRF
-CSRF_TRUSTED_ORIGINS=http://<your-server-ip>,http://<your-server-ip>:8000
+CSRF_TRUSTED_ORIGINS=http://<our-server-ip>,http://<our-server-ip>:8000
 
 # Frontend — empty string so frontend uses relative URLs
 VITE_DJANGO_BASE_URL=
 ```
 
-> **Note:** `VITE_DJANGO_BASE_URL` must be empty. The frontend uses relative
-> API calls (`/api/...`) which nginx proxies to the backend. Hardcoding an IP
-> here has no effect at runtime since Vite bakes this value into the JS bundle
-> at build time — it must be set correctly when the image is built locally,
-> not on the server.
+> **Note:** `VITE_DJANGO_BASE_URL` must be empty. The frontend uses relative API calls (`/api/...`) which Nginx proxies to the backend. Hardcoding an IP here has no effect at runtime since Vite bakes this value into the JS bundle at build time — it must be set correctly when the image is built locally, not on the server.
 
 ---
 
@@ -1081,11 +1072,7 @@ server {
 }
 ```
 
-> **Why `/media/` on port 80?**
-> The React frontend fetches product images via relative paths (`/media/...`).
-> Without this block on port 80, nginx would forward those requests to the
-> React container which has no media files — resulting in broken images.
-> The `alias` directive serves files directly from the shared `media_volume`.
+> **Why `/media/` on port 80?** The React frontend fetches product images via relative paths (`/media/...`). Without this block on port 80, Nginx would forward those requests to the React container which has no media files — resulting in broken images. The `alias` directive serves files directly from the shared `media_volume`.
 
 ---
 
@@ -1185,7 +1172,7 @@ volumes:
 
 ## Building and Pushing Images
 
-Run these commands on your **local development machine** before deploying.
+Run these commands on our **local development machine** before deploying.
 
 ### Backend
 
@@ -1196,8 +1183,7 @@ docker push kailashbadu/shophive-backend:v0.0.1
 
 ### Frontend
 
-The frontend image must be built with `VITE_DJANGO_BASE_URL` set to an empty
-string so the JS bundle uses relative API calls:
+The frontend image must be built with `VITE_DJANGO_BASE_URL` set to an empty string so the JS bundle uses relative API calls:
 
 ```bash
 docker build \
@@ -1213,8 +1199,7 @@ docker run --rm kailashbadu/shophive-frontend:v0.0.2 \
 docker push kailashbadu/shophive-frontend:v0.0.2
 ```
 
-> **Always verify before pushing.** The JS bundle is immutable after build.
-> If the wrong URL is baked in, the only fix is a rebuild and push.
+> **Always verify before pushing.** The JS bundle is immutable after build. If the wrong URL is baked in, the only fix is a rebuild and push.
 
 ### Bumping the tag
 
@@ -1224,8 +1209,7 @@ Always increment the image tag when pushing a new build:
 v0.0.1 → v0.0.2 → v0.0.3 ...
 ```
 
-Docker will not re-pull an image if the tag already exists locally. A new tag
-guarantees the server pulls the correct updated image.
+Docker will not re-pull an image if the tag already exists locally. A new tag guarantees the server pulls the correct updated image.
 
 ---
 
@@ -1235,7 +1219,7 @@ guarantees the server pulls the correct updated image.
 
 ```bash
 # SSH into EC2
-ssh -i your-key.pem ubuntu@<your-server-ip>
+ssh -i our-key.pem ubuntu@<our-server-ip>
 
 # Create app directory
 mkdir ~/app && cd ~/app
@@ -1250,7 +1234,7 @@ mkdir nginx
 docker compose up -d
 ```
 
-### Updating frontend image
+### Updating the frontend image
 
 ```bash
 # Update image tag in compose.yml, then:
@@ -1258,7 +1242,7 @@ docker compose pull frontend
 docker compose up -d --force-recreate frontend
 ```
 
-### Updating nginx config
+### Updating Nginx config
 
 Since `nginx/default.conf` is a volume mount, no rebuild is needed:
 
@@ -1267,7 +1251,7 @@ sudo vim nginx/default.conf
 docker compose restart nginx
 ```
 
-### Updating backend image
+### Updating the backend image
 
 ```bash
 docker compose pull backend
@@ -1288,7 +1272,7 @@ docker compose up -d
 ## Accessing Services
 
 | Service          | URL                          |
-|------------------|------------------------------|
+| ---------------- | ---------------------------- |
 | React Frontend   | `http://<server-ip>`         |
 | Django API       | `http://<server-ip>/api/`    |
 | Django Admin     | `http://<server-ip>/admin/`  |
@@ -1300,9 +1284,7 @@ docker compose up -d
 
 ### CORS error — `localhost:8000` in browser console
 
-**Cause:** Frontend image was built without passing `VITE_DJANGO_BASE_URL=`
-as a build arg, or with a hardcoded IP. The JS bundle has `localhost:8000`
-baked in.
+**Cause:** The frontend image was built without passing `VITE_DJANGO_BASE_URL=` as a build arg, or with a hardcoded IP. The JS bundle has `localhost:8000` baked in.
 
 **Fix:** Rebuild the frontend image with an empty build arg and push a new tag:
 
@@ -1320,8 +1302,7 @@ Update the tag in `compose.yml` and redeploy.
 
 ### Broken product images — media files not loading on frontend
 
-**Cause:** The port 80 nginx server block was missing a `/media/` location,
-so image requests went to the React container instead of the media volume.
+**Cause:** The port 80 Nginx server block was missing a `/media/` location, so image requests went to the React container instead of the media volume.
 
 **Fix:** Add to the port 80 server block in `nginx/default.conf`:
 
@@ -1331,35 +1312,31 @@ location /media/ {
 }
 ```
 
-Then restart nginx:
+Then restart Nginx:
 
 ```bash
 docker compose restart nginx
 ```
 
-### Vite Env Issue
+---
 
-Vite `VITE_*` variables are build-time only.
+### Vite env variable not updating at runtime
 
-`environment:` in Docker Compose does not update an already built React image.
+Vite `VITE_*` variables are **build-time only**.
 
-The value is injected during:
+The `environment:` key in Docker Compose does not update an already-built React image. The value is injected during `npm run build` and stored inside the generated JS files.
 
-```bash
-npm run build
-```
-and stored inside the generated JS files.
-
-When building frontend images in CI/CD, always pass the correct value
+When building frontend images in CI/CD, always pass the correct value:
 
 ```bash
 docker build --build-arg VITE_DJANGO_BASE_URL=<production-url> .
 ```
-Runtime env changes will not affect the built frontend.
 
-No need to panic if this happens — the issue was not with the code or deployment. The Docker image used in EC2 was built locally with the local environment value, so the frontend still had the local URL inside its built files. Rebuilding the image with the production value will fix it.
+Runtime environment changes will not affect the built frontend.
 
-The reason it worked with this command:
+> If this happens, there is no need to panic — the issue is not with the code or deployment. The Docker image was built locally with the local environment value, so the frontend still has the local URL inside its built files. Rebuilding the image with the production value will fix it.
+
+The reason the following command works:
 
 ```bash
 docker build \
@@ -1368,29 +1345,30 @@ docker build \
   -t kailashbadu/shophive-frontend:v0.0.2 \
   ./frontend
 ```
-is because i was  passing an empty value.
 
-my frontend code:
+...is because an empty value is being passed. The frontend code:
 
 ```javascript
 const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 ```
 
-gets built as: `const BASEURL = "";`
+gets built as:
 
-Then  API calls become: `fetch(`${BASEURL}/api/products/`)`
+```javascript
+const BASEURL = "";
+```
 
-which becomes: `fetch("/api/products/")`
+Then API calls become:
 
-This is a relative URL.
+```javascript
+fetch(`${BASEURL}/api/products/`)
+// resolves to:
+fetch("/api/products/")
+```
 
-Now the browser sends the request to the same origin where the frontend is loaded:
+This is a relative URL. The browser sends the request to the same origin where the frontend is loaded (`http://ec2-ip.com/api/products/`), and Nginx handles routing:
 
-http://ec2-ip.com/api/products/
-
-Then nginx handles it:
-
-```bash
+```
 Browser
    |
    v
@@ -1399,29 +1377,27 @@ nginx :80
    +--> frontend
    |
    +--> backend (/api)
-
 ```
 
-So it works because nginx is acting as the reverse proxy.
+Previously, the image was built with:
 
-Previously, we built with:
 ```
 --build-arg VITE_DJANGO_BASE_URL=http://localhost:8000
 ```
 
-our bundle contained: `const BASEURL = "http://localhost:8000";`
+...so the bundle contained:
 
-The browser then called:
+```javascript
+const BASEURL = "http://localhost:8000";
+```
 
-http://localhost:8000/api/products/
-
-but localhost refers to the user's machine, not EC2 server.
+The browser then called `http://localhost:8000/api/products/`, but `localhost` refers to the user's machine, not the EC2 server.
 
 ---
 
 ### 502 Bad Gateway on backend
 
-**Cause:** Backend container crashed or hasn't started yet.
+**Cause:** The backend container crashed or has not started yet.
 
 **Fix:**
 
@@ -1434,11 +1410,9 @@ docker compose restart backend
 
 ### Permission denied on `/app/media` or `/app/staticfiles`
 
-**Cause:** Docker named volumes are created as root-owned. The backend runs
-as user `65532` (DHI nonroot) and cannot write to root-owned directories.
+**Cause:** Docker named volumes are created as root-owned. The backend runs as user `65532` (DHI nonroot) and cannot write to root-owned directories.
 
-**Fix:** The `volume-init` service handles this by running `chown` as root
-before the backend starts. If it still fails, recreate the volumes:
+**Fix:** The `volume-init` service handles this by running `chown` as root before the backend starts. If it still fails, recreate the volumes:
 
 ```bash
 docker compose down
@@ -1450,7 +1424,7 @@ docker compose up -d
 
 ### Docker pulls old image despite pushing a new build
 
-**Cause:** Same image tag already exists locally. Docker skips the pull.
+**Cause:** The same image tag already exists locally. Docker skips the pull.
 
 **Fix:** Delete the local image and pull fresh:
 
@@ -1461,4 +1435,296 @@ docker compose up -d
 
 Or always bump the tag on every new build.
 
+---
 
+# Fixing React (Vite) Frontend to Django Backend Communication in Docker Production
+
+## Problem
+
+The React frontend application was showing CORS errors when communicating with the Django backend. Browser requests were going to:
+
+```
+http://localhost:8000/api/...
+```
+
+instead of:
+
+```
+http://our-domain.com/api/...
+```
+
+The cause was that the backend URL was being injected into the React application during the Vite build process.
+
+---
+
+## Root Cause
+
+The frontend was using:
+
+```javascript
+const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
+
+fetch(`${BASEURL}/api/products/`);
+```
+
+The Dockerfile contained:
+
+```dockerfile
+ARG VITE_DJANGO_BASE_URL
+ENV VITE_DJANGO_BASE_URL=${VITE_DJANGO_BASE_URL}
+
+RUN npm run build
+```
+
+And `docker-compose.yml` contained:
+
+```yaml
+frontend:
+  build:
+    args:
+      VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+```
+
+During `npm run build`, Vite replaced `import.meta.env.VITE_DJANGO_BASE_URL` with the actual value, making it part of the generated JavaScript bundle:
+
+```
+Before build: import.meta.env.VITE_DJANGO_BASE_URL
+After build:  "http://localhost:8000"
+```
+
+Passing environment variables when starting the container:
+
+```bash
+docker run -e VITE_DJANGO_BASE_URL=https://example.com
+```
+
+...has no effect on an already-built React bundle.
+
+---
+
+## Solution
+
+Instead of making React communicate with Django using a hostname, use Nginx as a reverse proxy.
+
+**Architecture:**
+
+```
+Browser
+   |
+   | http://domain.com
+   |
+   v
+ Nginx
+   |
+   +------------+
+   |            |
+   v            v
+React        Django
+:80          :8000
+```
+
+The frontend only calls relative URLs:
+
+```
+/api/products
+/api/login
+/api/cart
+```
+
+Nginx forwards those requests to Django.
+
+---
+
+### Step 1: Remove Vite build environment variables from `frontend/Dockerfile`
+
+Removed:
+
+```dockerfile
+ARG VITE_DJANGO_BASE_URL
+ENV VITE_DJANGO_BASE_URL=${VITE_DJANGO_BASE_URL}
+```
+
+Final build stage:
+
+```dockerfile
+FROM node:${NODE_VERSION} AS builder
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+
+RUN npm ci
+
+COPY . .
+
+RUN npm run build
+```
+
+---
+
+### Step 2: Remove frontend env injection from `docker-compose.yml`
+
+Removed from `build`:
+
+```yaml
+build:
+  args:
+    VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+```
+
+Removed from `environment`:
+
+```yaml
+environment:
+  VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+```
+
+**Reason:** React is already compiled into static files. The Nginx container environment cannot modify the JavaScript bundle after build.
+
+---
+
+### Step 3: Centralize frontend API URL
+
+Created a common config at `frontend/src/config.js`:
+
+```javascript
+const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL || "";
+
+export default BASEURL;
+```
+
+The empty string fallback is important:
+
+- **Production:** `BASEURL = ""` → frontend calls `/api/products/`
+- **Development:** `VITE_DJANGO_BASE_URL=http://localhost:8000` → frontend calls `http://localhost:8000/api/products/`
+
+---
+
+### Step 4: Replace direct env usage
+
+Before:
+
+```javascript
+const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
+```
+
+After:
+
+```javascript
+import BASEURL from "../config";
+```
+
+Updated files:
+
+- `src/components/ProductCard.jsx`
+- `src/context/CartContext.jsx`
+- `src/pages/ProductList.jsx`
+- `src/pages/Login.jsx`
+- `src/pages/CheckoutPage.jsx`
+- `src/pages/Signup.jsx`
+- `src/pages/CartPage.jsx`
+- `src/pages/ProductDetails.jsx`
+- `src/pages/Home.jsx`
+
+---
+
+### Step 5: Configure Nginx reverse proxy
+
+Updated `nginx/default.conf`:
+
+```nginx
+server {
+    listen 80;
+
+    location /api/ {
+        proxy_pass http://backend:8000;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /admin/ {
+        proxy_pass http://backend:8000;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /static/ {
+        alias /app/staticfiles/;
+    }
+
+    location /media/ {
+        alias /app/media/;
+    }
+
+    location / {
+        proxy_pass http://frontend:80;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+---
+
+### Step 6: Rebuild the frontend
+
+Because Vite generates static files during build, the old bundle had to be recreated:
+
+```bash
+docker compose build --no-cache frontend
+
+docker compose up -d frontend nginx
+```
+
+---
+
+## Verification
+
+Before fix:
+
+```
+GET /undefined/api/products/
+# or
+GET http://localhost:8000/api/products/
+```
+
+After fix:
+
+```
+GET /api/products/
+```
+
+Request flow:
+
+```
+Browser
+ |
+ | /api/products/
+ |
+ v
+Nginx
+ |
+ | proxy_pass
+ |
+ v
+Django backend
+```
+
+Django admin is now accessible at `http://our-domain.com/admin/` instead of `http://our-domain.com:8000/admin/`.
+
+---
+
+## Final Benefits
+
+- No CORS issues
+- Same frontend image works across different environments
+- No backend URL baked into the React bundle
+- Nginx handles all routing
+- Production deployment matches common frontend/backend architecture

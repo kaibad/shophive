@@ -1,9 +1,9 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { saveTokens } from "../utils/auth";
+import BASEURL from "../config.js";
 
 function Login() {
-  const BASE = import.meta.env.VITE_DJANGO_BASE_URL;
   const [form, setForm] = useState({ username: "", password: "" });
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
@@ -56,7 +56,10 @@ function Login() {
         <div className="card p-6 sm:p-8">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="username" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="username"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Username
               </label>
               <input
@@ -70,7 +73,10 @@ function Login() {
               />
             </div>
             <div>
-              <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="password"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Password
               </label>
               <input
@@ -107,7 +113,10 @@ function Login() {
 
           <p className="mt-6 text-center text-sm text-slate-500">
             Don&apos;t have an account?{" "}
-            <Link to="/signup" className="font-semibold text-brand-700 hover:text-brand-800">
+            <Link
+              to="/signup"
+              className="font-semibold text-brand-700 hover:text-brand-800"
+            >
               Create one
             </Link>
           </p>

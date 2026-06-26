@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import BASEURL from "../config.js";
 
 function Signup() {
-  const BASE = import.meta.env.VITE_DJANGO_BASE_URL;
   const [form, setForm] = useState({
     username: "",
     email: "",
@@ -64,7 +64,10 @@ function Signup() {
         <div className="card p-6 sm:p-8">
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="username" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="username"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Username
               </label>
               <input
@@ -78,7 +81,10 @@ function Signup() {
               />
             </div>
             <div>
-              <label htmlFor="email" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="email"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Email
               </label>
               <input
@@ -92,7 +98,10 @@ function Signup() {
               />
             </div>
             <div>
-              <label htmlFor="password" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="password"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Password
               </label>
               <input
@@ -107,7 +116,10 @@ function Signup() {
               />
             </div>
             <div>
-              <label htmlFor="password2" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="password2"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Confirm Password
               </label>
               <input
@@ -144,7 +156,10 @@ function Signup() {
 
           <p className="mt-6 text-center text-sm text-slate-500">
             Already have an account?{" "}
-            <Link to="/login" className="font-semibold text-brand-700 hover:text-brand-800">
+            <Link
+              to="/login"
+              className="font-semibold text-brand-700 hover:text-brand-800"
+            >
               Sign in
             </Link>
           </p>

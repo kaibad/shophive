@@ -1,8 +1,7 @@
 import { Link } from "react-router-dom";
+import BASEURL from "../config.js";
 
 function ProductCard({ product }) {
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
-
   return (
     <Link to={`/product/${product.id}`} className="group block h-full">
       <article className="card flex h-full flex-col overflow-hidden transition-all duration-300 group-hover:-translate-y-1 group-hover:shadow-lg group-hover:shadow-brand-500/10">
