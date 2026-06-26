@@ -140,9 +140,6 @@ jobs:
           context: ./frontend
           push: true
 
-          build-args: |
-            VITE_DJANGO_BASE_URL=http://${{secrets.EC2_PUBLIC_IP }}
-            
           tags: |
             ${{ env.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
             ${{ env.FRONTEND_IMAGE }}:dev-latest
