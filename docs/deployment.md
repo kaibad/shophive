@@ -29,6 +29,31 @@ Production — tag-triggered, images go to ECR (not Docker Hub), deployment via 
 
 ## Github secrets
 
+Step 1: Create Environments
+Open your GitHub repository.
+Go to Settings → Environments.
+Click New environment.
+Create the following environments:
+development
+staging
+production
+
+
+Step 2: Add Variables (non-sensitive)
+
+For each environment, go to:
+
+Environment → Variables → Add variable
+
+
+Step 3: Add Secrets (sensitive)
+
+Go to:
+
+Environment → Secrets → Add secret
+
+
+
 | Secret                  | Used In      |
 | ----------------------- | ------------ |
 | `DOCKERHUB_USERNAME`    | dev, staging |
@@ -42,6 +67,42 @@ Production — tag-triggered, images go to ECR (not Docker Hub), deployment via 
 | `AWS_SECRET_ACCESS_KEY` | prod         |
 | `CODEDEPLOY_S3_BUCKET`  | prod         |
 
+Step 4: Use the Environment in GitHub Actions
+
+```
+name: Deploy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    environment: development   # change to staging or production
+
+    env:
+      APP_ENV: ${{ vars.APP_ENV }}
+      DB_HOST: ${{ vars.DB_HOST }}
+      DB_NAME: ${{ vars.DB_NAME }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      API_KEY: ${{ secrets.API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Print environment
+        run: |
+          echo "Environment: $APP_ENV"
+          echo "Database: $DB_HOST/$DB_NAME"
+
+```
+
+Best practice
+Variables (vars): Use for non-sensitive configuration (URLs, ports, log levels, environment names).
+Secrets (secrets): Use for passwords, API keys, tokens, certificates, and other sensitive values.
+Configure protection rules for the production environment (such as required reviewers) to prevent accidental deployments.
 
 
 Bandit is an open-source Static Application Security Testing (SAST) tool designed specifically to find common security issues in Python code.  Developed by the Python Code Quality Authority (PyCQA), it operates by parsing source files into an Abstract Syntax Tree (AST) and running specialized security plugins against the code structure rather than performing simple text searches. 
