@@ -213,12 +213,36 @@ jobs:
     environment: development
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
+  - name: Checkout repo
+    uses: actions/checkout@v4
 
-      - name: Deploy application
-        run: |
-          echo "Deploying to development server"
+  - name: Copy compose files to EC2
+    uses: appleboy/scp-action@v0.1.7
+    with:
+      host: ${{ secrets.DEV_EC2_HOST }}
+      username: ${{ secrets.DEV_EC2_USER }}
+      key: ${{ secrets.DEV_EC2_SSH_KEY }}
+      source: "compose.dev.yml,nginx/"
+      target: "~/shophive"
+
+  - name: Deploy via SSH
+    uses: appleboy/ssh-action@v1.2.0
+    with:
+      host: ${{ secrets.DEV_EC2_HOST }}
+      username: ${{ secrets.DEV_EC2_USER }}
+      key: ${{ secrets.DEV_EC2_SSH_KEY }}
+      envs: DEV_ENV_FILE
+      script: |
+        set -e
+        cd ~/shophive
+
+        echo "$DEV_ENV_FILE" > .env
+
+        docker compose -f compose.dev.yml pull
+        docker compose -f compose.dev.yml up -d --remove-orphans
+        docker image prune -f
+    env:
+      DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
 
 
             
