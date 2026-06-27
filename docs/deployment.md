@@ -1,426 +1,349 @@
-# cicd
+# ShopHive — CI/CD Documentation
 
-1. CI/CD Architecture 
+> This document covers the development pipeline in full detail. Staging and production pipelines are coming soon.
 
-Branch → Environment Mapping
+---
 
-dev push -> Development -> EC2 Dev Server
+## Architecture Overview
 
-dev → staging mergeStaging/QA -> EC2 Staging Server
+ShopHive follows a three-environment CI/CD strategy mapped to Git branches and tags:
 
-Git tag v*.*.* + manual approvalProduction -> AWS Native (ECR + ECS/CodeDeploy)
+| Trigger | Environment | Infrastructure |
+|---|---|---|
+| Push to `main` | Development | EC2 Dev Server (Docker Compose) |
+| Merge to `staging` | Staging/QA | EC2 Staging Server (Docker Compose) |
+| Git tag `v*.*.*` + manual approval | Production | AWS ECR + ECS/CodeDeploy |
 
+I created three separate workflow files under `.github/workflows/` to keep each environment's pipeline isolated and independently configurable:
 
-create dev and staging brach
-
-Pipeline Overview
-Dev — fast feedback loop, push to Docker Hub, SSH deploy to dev EC2.
-Staging — same flow but triggered on merge to staging, deploys to staging EC2. QA team tests here.
-Production — tag-triggered, images go to ECR (not Docker Hub), deployment via AWS CodePipeline → CodeDeploy with a manual approval gate in between.
-
-```bash
+```
 .github/
 └── workflows/
-    ├── ci-dev.yml          # dev branch push
-    ├── ci-staging.yml      # staging branch push (after merge)
-    └── ci-prod.yml         # tag push v*.*.* + manual approval
-
+    ├── dev.yml          # triggers on push to main
+    ├── staging.yml      # triggers on push to staging branch (coming soon)
+    └── prod.yml         # triggers on git tag v*.*.* (coming soon)
 ```
-
-## Github secrets
-
-Step 1: Create Environments
-Open your GitHub repository.
-Go to Settings → Environments.
-Click New environment.
-Create the following environments:
-development
-staging
-production
-
-
-Step 2: Add Variables (non-sensitive)
-
-For each environment, go to:
-
-Environment → Variables → Add variable
-
-
-Step 3: Add Secrets (sensitive)
-
-Go to:
-
-Environment → Secrets → Add secret
-
-
-
-| Secret                  | Used In      |
-| ----------------------- | ------------ |
-| `DOCKERHUB_USERNAME`    | dev, staging |
-| `DOCKERHUB_TOKEN`       | dev, staging |
-| `DEV_EC2_HOST`          | dev          |
-| `DEV_EC2_SSH_KEY`       | dev          |
-| `STAGING_EC2_HOST`      | staging      |
-| `STAGING_EC2_SSH_KEY`   | staging      |
-| `AWS_ACCOUNT_ID`        | prod         |
-| `AWS_ACCESS_KEY_ID`     | prod         |
-| `AWS_SECRET_ACCESS_KEY` | prod         |
-| `CODEDEPLOY_S3_BUCKET`  | prod         |
-
-Step 4: Use the Environment in GitHub Actions
-
-```
-name: Deploy
-
-on:
-  workflow_dispatch:
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-
-    environment: development   # change to staging or production
-
-    env:
-      APP_ENV: ${{ vars.APP_ENV }}
-      DB_HOST: ${{ vars.DB_HOST }}
-      DB_NAME: ${{ vars.DB_NAME }}
-      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-      JWT_SECRET: ${{ secrets.JWT_SECRET }}
-      API_KEY: ${{ secrets.API_KEY }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Print environment
-        run: |
-          echo "Environment: $APP_ENV"
-          echo "Database: $DB_HOST/$DB_NAME"
-
-```
-
-Best practice
-Variables (vars): Use for non-sensitive configuration (URLs, ports, log levels, environment names).
-Secrets (secrets): Use for passwords, API keys, tokens, certificates, and other sensitive values.
-Configure protection rules for the production environment (such as required reviewers) to prevent accidental deployments.
-
-
-Bandit is an open-source Static Application Security Testing (SAST) tool designed specifically to find common security issues in Python code.  Developed by the Python Code Quality Authority (PyCQA), it operates by parsing source files into an Abstract Syntax Tree (AST) and running specialized security plugins against the code structure rather than performing simple text searches. 
-
-In GitHub Actions workflows, Bandit is commonly integrated to automate security scanning on every push or pull request.  It identifies vulnerabilities such as hardcoded passwords, insecure deserialization (e.g., pickle), SQL injection, and the use of dangerous functions like eval() or exec().  The tool outputs findings categorized by severity (Low, Medium, High) and confidence levels, often generating JSON reports that can be uploaded as artifacts for review. 
-
-Bandit (SAST)
-bandit -r backend -f json -o bandit-report.json \
-  --severity-level medium \
-  --confidence-level medium || true
-
-The || true means:
-
-Run Bandit.
-Even if Bandit finds issues and returns an error code, convert it to success.
-
-Bandit (SAST)
-bandit -r backend -f json -o bandit-report.json \
-  --severity-level medium \
-  --confidence-level medium || true
-
-The || true means:
-
-Run Bandit.
-Even if Bandit finds issues and returns an error code, convert it to success.
-
-# REFERENCES
-
-- SECURITY IN PIPELINE: https://youtu.be/ZUquwnJnfNw?si=kpxbcQ3MJAyJLy7y
-
-
-
-# ShopHive — Dev Pipeline Documentation
-
-## Overview
-
-This document covers the full development CI/CD pipeline for ShopHive — what was built, what questions came up during the process, how they were resolved, and the final pipeline configuration.
-
----
-
-## What We Built
-
-A complete GitHub Actions CI/CD pipeline for the `main` branch that:
-
-- Scans for secrets, code vulnerabilities, and dependency issues before anything is built
-- Scans the filesystem with Trivy before build and the Docker images after build
-- Builds and pushes backend and frontend Docker images to Docker Hub
-- Deploys to a dev EC2 instance via SSH
-- Runs a post-deploy health check
-- Rolls back automatically if the health check fails
-- Sends a Slack notification if anything in the pipeline fails
-
----
-
-## Pipeline Flow
-
-```
-gitleaks
-├── sast             ┐
-├── dependency-scan  ├──► build ──► trivy-image ──► deploy ──► health-check
-└── trivy-fs         ┘                                               │
-                                                         ┌───────────┴───────────┐
-                                                    (pass) ✅              (fail) ❌
-                                                                     rollback + slack notify
-```
-
-### Jobs summary
-
-| Job | Purpose | Blocks |
-|---|---|---|
-| `gitleaks` | Scan for hardcoded secrets | Everything |
-| `sast` | Bandit static analysis on Django backend | `build` |
-| `dependency-scan` | pip-audit + npm audit | `build` |
-| `trivy-fs` | Trivy filesystem scan (source + deps) | `build` |
-| `build` | Build and push Docker images to Docker Hub | `trivy-image` |
-| `trivy-image` | Trivy scan on pushed backend/frontend images | `deploy` |
-| `deploy` | SSH into EC2, pull images, run docker compose | `health-check` |
-| `health-check` | curl the app, retry 12x over 2 minutes | `rollback` (on fail) |
-| `rollback` | Re-tag dev-previous → dev-latest, restart compose | — |
-| `notify` | Slack alert with run URL if any job fails | — |
-
----
-
-## Questions and Confusions — How They Were Resolved
-
-### 1. "Should I add Trivy FS scan and Trivy image scan?"
-
-**Confusion:** The original pipeline had Gitleaks, Bandit, and pip-audit/npm-audit but no Trivy at all.
-
-**Resolution:** Two Trivy jobs were added at different points in the pipeline:
-
-- `trivy-fs` runs **before build** — scans source code and filesystem for CVEs
-- `trivy-image` runs **after build** — scans the actual Docker images that were pushed to Docker Hub
-
-Both use `exit-code: 0` in the dev pipeline, meaning they warn but never block. This is intentional — dev pipelines should surface issues without stopping every push. Staging and prod pipelines will use `exit-code: 1` to hard-block on HIGH/CRITICAL findings.
-
----
-
-### 2. "Should I hardcode image names or use GitHub environment variables?"
-
-**Confusion:** The original pipeline had this at the top of the workflow:
-
-```yaml
-env:
-  BACKEND_IMAGE: kailashbadu/shophive-backend
-  FRONTEND_IMAGE: kailashbadu/shophive-frontend
-```
-
-This mixed the Docker Hub username and image name together as a hardcoded string.
-
-**Resolution:** Split them so each part is managed separately and securely:
-
-- `DOCKERHUB_USERNAME` (`kailashbadu`) stored as a **GitHub Secret** in the `development` environment — it's a credential, not config
-- `BACKEND_IMAGE` (`shophive-backend`) and `FRONTEND_IMAGE` (`shophive-frontend`) stored as **GitHub Variables** in the `development` environment — they're config, not secrets
-
-The full image reference in the workflow becomes:
-
-```yaml
-${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
-```
-
-This also means the top-level `env:` block is removed entirely from the workflow file.
-
----
-
-### 3. "Will docker compose up rebuild postgres and nginx — will that slow things down?"
-
-**Confusion:** The concern was that running `docker compose up` on EC2 during deploy would trigger slow rebuilds of postgres and nginx.
-
-**Resolution:** No — postgres (`postgres:15-alpine`) and nginx (`nginx:alpine`) are pre-built public images. They only pull from Docker Hub if not already cached, which is fast. There is no build step for them.
-
-The only things that were slow were the `build:` contexts for backend and frontend in the original `docker-compose.yml`. The fix is to replace those with `image:` references pointing to the pre-built Docker Hub images:
-
-```yaml
-# docker-compose.yml on EC2
-backend:
-  image: kailashbadu/shophive-backend:dev-latest
-
-frontend:
-  image: kailashbadu/shophive-frontend:dev-latest
-```
-
-Now `docker compose pull` + `docker compose up -d` on EC2 is just pulling pre-built images and restarting containers — fast and correct.
-
-The recommended approach is to keep the local `docker-compose.yml` with `build:` contexts for local development, and use a `docker-compose.prod.yml` override on EC2 that swaps in image references.
-
----
-
-### 4. "How does the .env file get onto EC2?"
-
-**Confusion:** The pipeline deploys via SSH and runs `docker compose up`, but `docker-compose.yml` depends on a `.env` file for database credentials, Django secret key, and other config. There was no mechanism to get that file onto the server.
-
-**Resolution:** Store the entire `.env` file contents as a single GitHub Secret called `DEV_ENV_FILE` in the `development` environment. During the deploy step, write it to disk on EC2 before running compose:
-
-```yaml
-- name: Deploy via SSH
-  uses: appleboy/ssh-action@v1.2.0
-  with:
-    host: ${{ secrets.DEV_EC2_HOST }}
-    username: ${{ secrets.DEV_EC2_USER }}
-    key: ${{ secrets.DEV_EC2_SSH_KEY }}
-    envs: DEV_ENV_FILE
-    script: |
-      echo "$DEV_ENV_FILE" > .env
-      docker compose pull
-      docker compose up -d --remove-orphans
-  env:
-    DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
-```
-
-The `envs` parameter passes the env var into the SSH session so the script can access it.
-
----
-
-### 5. "What happens if the deploy fails — there was no rollback"
-
-**Confusion:** If a bad image was deployed and the app broke, there was no way to recover automatically.
-
-**Resolution:** A two-step rollback strategy was added:
-
-**Step 1 — Snapshot before deploy.** Before pulling new images, tag the current `dev-latest` as `dev-previous`:
-
-```bash
-docker tag kailashbadu/shophive-backend:dev-latest \
-           kailashbadu/shophive-backend:dev-previous || true
-```
-
-The `|| true` prevents failure on first deploy when no previous image exists yet.
-
-**Step 2 — Rollback job.** A separate `rollback` job runs only `if: failure()` after `health-check`. It re-tags `dev-previous` back to `dev-latest` and restarts compose:
-
-```bash
-docker tag kailashbadu/shophive-backend:dev-previous \
-           kailashbadu/shophive-backend:dev-latest
-
-docker compose up -d --remove-orphans
-```
-
----
-
-### 6. "There was no health check after deploy"
-
-**Confusion:** The pipeline was deploying but had no way to verify the app was actually running after the containers started.
-
-**Resolution:** A `health-check` job was added after `deploy`. It SSHes into EC2 and polls `/api/health/` up to 12 times with a 10-second delay between attempts (2 minutes total):
-
-```bash
-for i in $(seq 1 12); do
-  if curl -sf http://localhost/api/health/ > /dev/null; then
-    echo "✅ Health check passed"
-    exit 0
-  fi
-  sleep 10
-done
-exit 1
-```
-
-This requires a `/api/health/` endpoint in Django:
-
-```python
-from django.http import JsonResponse
-
-def health(request):
-    return JsonResponse({"status": "ok"})
-```
-
-If the health check fails after 2 minutes, the job exits with code 1, which triggers the `rollback` job and the `notify` job.
-
----
-
-### 7. "Trivy image scan reports were not being uploaded"
-
-**Confusion:** The FS scan had an artifact upload step but the image scan jobs had no artifact upload — so scan results were visible in logs but not downloadable or auditable after the run.
-
-**Resolution:** Added `output:` parameter to both Trivy image scan steps and a single upload artifact step that collects both reports:
-
-```yaml
-- name: Upload Trivy image reports
-  uses: actions/upload-artifact@v4
-  if: always()
-  with:
-    name: trivy-image-report-dev
-    path: |
-      trivy-backend-image.txt
-      trivy-frontend-image.txt
-    retention-days: 7
-```
-
-`if: always()` ensures reports are uploaded even if the scan step fails.
 
 ---
 
 ## GitHub Environment Setup
 
-All secrets and variables live under **Settings → Environments → development** in the repository.
+Before the pipelines work, I set up environments in GitHub to scope secrets and variables per environment.
 
-### Secrets
+### Step 1 — Create environments
 
-| Secret | Value |
+I go to my repository on GitHub, then navigate to **Settings → Environments → New environment** and create three environments:
+
+- `development`
+- `staging`
+- `production`
+
+### Step 2 — Add variables (non-sensitive config)
+
+For each environment I go to **Environment → Variables → Add variable** and add image names and other config values that are safe to expose.
+
+### Step 3 — Add secrets (sensitive values)
+
+For each environment I go to **Environment → Secrets → Add secret** and add credentials — Docker Hub tokens, SSH keys, AWS keys, and the `.env` file contents.
+
+**Rule I follow:**
+
+- Variables (`vars.*`): non-sensitive configuration — image names, ports, environment names, log levels
+- Secrets (`secrets.*`): passwords, tokens, API keys, SSH private keys, certificates, `.env` file contents
+
+### Full secrets and variables reference
+
+| Secret | Environment |
 |---|---|
-| `DOCKERHUB_USERNAME` | `kailashbadu` |
-| `DOCKERHUB_TOKEN` | Docker Hub access token |
-| `DEV_EC2_HOST` | EC2 public IP address |
-| `DEV_EC2_USER` | `ubuntu` |
-| `DEV_EC2_SSH_KEY` | Contents of your `.pem` private key |
-| `DEV_ENV_FILE` | Full contents of your `.env` file |
-| `SLACK_WEBHOOK_URL` | Slack incoming webhook URL |
+| `DOCKERHUB_USERNAME` | development, staging |
+| `DOCKERHUB_TOKEN` | development, staging |
+| `DEV_EC2_HOST` | development |
+| `DEV_EC2_USER` | development |
+| `DEV_EC2_SSH_KEY` | development |
+| `DEV_ENV_FILE` | development |
+| `SLACK_WEBHOOK_URL` | development |
+| `STAGING_EC2_HOST` | staging |
+| `STAGING_EC2_SSH_KEY` | staging |
+| `AWS_ACCOUNT_ID` | production |
+| `AWS_ACCESS_KEY_ID` | production |
+| `AWS_SECRET_ACCESS_KEY` | production |
+| `CODEDEPLOY_S3_BUCKET` | production |
 
-### Variables
-
-| Variable | Value |
-|---|---|
-| `BACKEND_IMAGE` | `shophive-backend` |
-| `FRONTEND_IMAGE` | `shophive-frontend` |
+| Variable | Environment | Value |
+|---|---|---|
+| `BACKEND_IMAGE` | development | `shophive-backend` |
+| `FRONTEND_IMAGE` | development | `shophive-frontend` |
 
 ---
 
-## EC2 Setup Requirements
+## Development Pipeline
 
-Before the pipeline can deploy, the EC2 instance needs:
+### What it does
 
-- Docker and Docker Compose installed
-- `~/shophive/` directory created
-- `docker-compose.yml` present using `image:` references (not `build:` contexts) for backend and frontend
-- The EC2 security group allowing inbound HTTP (port 80) so the health check can reach `localhost`
+The dev pipeline triggers on every push to `main`. It runs security scans in parallel, builds Docker images, pushes them to Docker Hub, copies the compose file to the EC2 server via SCP, deploys via SSH, and verifies the app is running with a health check. If anything fails, a Slack notification fires with a direct link to the failed run.
 
-The `.env` file is written by the pipeline on every deploy — it does not need to be manually placed on the server.
+### Pipeline flow
+
+```
+gitleaks
+├── sast
+├── dependency-scan     ──► build ──► trivy-image ──► deploy ──► health-check
+└── trivy-fs                                                           |
+                                                              (fail) notify
+```
+
+---
+
+### Job descriptions
+
+#### gitleaks — Secret Scan
+
+This is the first job that runs and everything else depends on it. I use Gitleaks to scan the entire Git history for hardcoded secrets — API keys, passwords, tokens, or any sensitive string that should never have been committed to the repository.
+
+I pass `fetch-depth: 0` to the checkout step so Gitleaks scans all commits in history, not just the latest one. If a secret was committed three months ago and never removed, this catches it.
+
+---
+
+#### sast — Static Application Security Testing
+
+After Gitleaks passes, I run Bandit against the Django backend source code. Bandit is an open-source SAST tool developed by the Python Code Quality Authority (PyCQA). It works by parsing Python source files into an Abstract Syntax Tree and running security plugins against the code structure — it does not do simple text searches.
+
+It catches issues like:
+
+- Hardcoded passwords
+- Use of `eval()` or `exec()`
+- SQL injection patterns
+- Insecure deserialization with `pickle`
+- Use of weak cryptography
+
+The command I run:
+
+```bash
+bandit -r backend -f json -o bandit-report.json \
+  --severity-level medium \
+  --confidence-level medium || true
+```
+
+The `|| true` at the end means: run Bandit, and even if it finds issues and exits with a non-zero code, treat it as success so the pipeline continues. In dev I want to surface issues without blocking every push. In staging and prod I will remove `|| true` to hard-block on findings.
+
+The JSON report is uploaded as an artifact and is downloadable from the Actions run page for 7 days.
+
+---
+
+#### dependency-scan — Dependency Vulnerability Scan
+
+Also runs in parallel after Gitleaks. I run two tools here:
+
+`pip-audit` scans `backend/requirements.txt` against the Python Advisory Database for known CVEs in Python packages.
+
+`npm audit` scans the React frontend `package.json` against the npm security advisory database for vulnerabilities in Node packages.
+
+Both use `|| true` in dev for the same reason as Bandit — warn but do not block. Both reports are uploaded as a single artifact.
+
+---
+
+#### trivy-fs — Trivy Filesystem Scan
+
+Also runs in parallel after Gitleaks. I use Trivy to scan the entire repository filesystem — source code, dependency lock files, Dockerfiles, and configuration files — for known CVEs before anything gets built.
+
+Running this before the build means I catch vulnerabilities at the source level. If a lock file references a package with a known CVE, I want to know before spending time building an image that will fail the image scan anyway.
+
+I use `exit-code: 0` in dev so it warns but never blocks. In staging and prod I will set `exit-code: 1` to hard-block on HIGH and CRITICAL findings.
+
+---
+
+#### build — Build and Push Docker Images
+
+This job waits for `sast`, `dependency-scan`, and `trivy-fs` to all pass before it runs. All three security gates must be green before I build anything.
+
+I generate a short SHA tag from the first 7 characters of the commit SHA so every image is traceable to the exact commit that produced it. I log in to Docker Hub using secrets from the `development` environment and use Docker Buildx with GitHub Actions cache for efficient layer caching.
+
+Each image gets two tags on every build:
+
+| Tag | Purpose |
+|---|---|
+| `dev-<short-sha>` | Immutable — tied to the exact commit, used by Trivy image scan |
+| `dev-latest` | Mutable — always points to the most recent build, used by EC2 |
+
+---
+
+#### trivy-image — Trivy Image Scan
+
+After the images are pushed to Docker Hub, I scan them with Trivy. This is different from the filesystem scan — it scans inside the built Docker image, including base image layers and all OS-level packages installed by the Dockerfile.
+
+For example, if my base image (`python:3.13-alpine`) has a CVE in a bundled library, the filesystem scan would not catch it because that library only exists inside the image. The image scan catches it.
+
+I scan both the backend and frontend images separately and upload both reports as artifacts. `exit-code: 0` in dev.
+
+---
+
+#### deploy — Deploy to Dev EC2
+
+The deploy job has three steps:
+
+**Step 1 — Checkout.** I check out the repo on the GitHub runner so the compose file is available to copy.
+
+**Step 2 — SCP compose files to EC2.** I use `appleboy/scp-action` to copy `compose.dev.yml` and the `nginx/` directory from the GitHub runner directly to `~/shophive` on the EC2 server. This means the compose file on the server always matches exactly what is in the repository — I never have to manually SSH in to update it.
+
+**Step 3 — SSH deploy.** I SSH into the EC2 server and run:
+
+1. Write the `.env` file from the `DEV_ENV_FILE` GitHub secret — this is how all environment variables reach the server securely on every deploy
+2. Pull the latest images with `docker compose pull`
+3. Restart all services with `docker compose up -d --remove-orphans`
+4. Prune dangling images with `docker image prune -f` to keep disk usage clean
+
+**How the .env file gets to EC2:**
+
+I store the entire contents of my `.env` file as a single GitHub Secret called `DEV_ENV_FILE` in the `development` environment. I go to **Settings → Environments → development → Secrets → Add secret**, set the name to `DEV_ENV_FILE`, and paste the raw file contents as the value — no quotes, no escaping, exactly as the file looks locally:
+
+```
+SECRET_KEY=django-insecure-xxxxxxxxxxxxxxxx
+DEBUG=False
+
+DB_NAME=shophive
+DB_USER=postgres
+DB_PASSWORD=yourpassword
+DB_HOST=postgres
+DB_PORT=5432
+```
+
+On every deploy the pipeline writes this to `~/shophive/.env` on the server with:
+
+```bash
+echo "$DEV_ENV_FILE" > .env
+```
+
+I never need to manually SSH into the server to update environment variables. I update the secret in GitHub and the next deploy picks it up automatically.
+
+---
+
+#### health-check — Post-Deploy Verification
+
+After deploy, I SSH back into the EC2 server and poll the `/api/health/` endpoint up to 12 times with a 10-second wait between each attempt — 2 minutes total.
+
+If the endpoint responds with HTTP 200, the health check passes and the pipeline succeeds. If it never responds after 2 minutes, the job exits with code 1 which triggers the `notify` job.
+
+This requires a health endpoint in Django:
+
+```python
+# urls.py
+from django.http import JsonResponse
+
+def health(request):
+    return JsonResponse({"status": "ok"})
+
+urlpatterns = [
+    path("api/health/", health),
+    ...
+]
+```
+
+---
+
+#### notify — Slack Failure Notification
+
+This job runs `if: failure()` and lists all other jobs in its `needs` array. If anything in the pipeline fails — any scan, the build, the deploy, or the health check — this job fires a Slack message containing:
+
+- Repository name
+- Branch name
+- Who triggered the run
+- Direct link to the failed Actions run
+
+I never need to check GitHub manually to know when a deploy broke.
+
+---
+
+## EC2 Server Setup (one-time)
+
+Before the pipeline can deploy for the first time, I do the following on the EC2 instance:
+
+```bash
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+
+# Create docker group and add ubuntu user
+sudo groupadd docker
+sudo usermod -aG docker ubuntu
+newgrp docker
+
+# Create the project directory
+mkdir -p ~/shophive
+
+# Verify Docker works without sudo
+docker ps
+docker compose version
+```
+
+The EC2 security group must allow inbound HTTP on port 80 so the health check can reach `http://localhost/api/health/`.
+
+The `.env` file does not need to be placed on the server manually — the pipeline writes it on every deploy.
+
+---
+
+## Compose File Strategy
+
+I maintain two compose files:
+
+- `docker-compose.yml` — used locally, contains `build:` contexts for backend and frontend so I can build and test locally
+- `compose.dev.yml` — used on EC2, references pre-built Docker Hub images instead of building
+
+```yaml
+# compose.dev.yml
+services:
+  backend:
+    image: kailashbadu/shophive-backend:dev-latest
+
+  frontend:
+    image: kailashbadu/shophive-frontend:dev-latest
+```
+
+The pipeline copies `compose.dev.yml` to the server on every deploy, so it always stays in sync with the repository.
+
+When `docker compose up` runs on EC2, postgres, nginx, and volume-init are all pre-built public images — they pull from Docker Hub with no build step and no significant delay. Only backend and frontend are custom images, and those are already built and pushed to Docker Hub before the deploy step runs.
 
 ---
 
 ## Artifacts Produced Per Run
 
-| Artifact | Job | Contents |
-|---|---|---|
-| `bandit-report-dev` | `sast` | Bandit JSON report |
-| `dependency-report-dev` | `dependency-scan` | pip-audit JSON + npm-audit JSON |
-| `trivy-fs-report-dev` | `trivy-fs` | Trivy filesystem scan table |
-| `trivy-image-report-dev` | `trivy-image` | Trivy backend + frontend image scan tables |
+Every run produces downloadable scan reports under the Artifacts section of the Actions run page.
 
-All artifacts are retained for 7 days.
-
----
-
-## Image Tagging Strategy
-
-Each build produces two tags per image:
-
-| Tag | Example | Purpose |
-|---|---|---|
-| `dev-<short-sha>` | `dev-a1b2c3d` | Immutable — tied to exact commit |
-| `dev-latest` | `dev-latest` | Mutable — always points to most recent build |
-| `dev-previous` | `dev-previous` | Created on EC2 during deploy — used for rollback |
-
-The `dev-<short-sha>` tag is what Trivy image scans use. The EC2 server runs off `dev-latest`.
+| Artifact | Job | Contents | Retention |
+|---|---|---|---|
+| `bandit-report-dev` | `sast` | Bandit JSON report | 7 days |
+| `dependency-report-dev` | `dependency-scan` | pip-audit JSON + npm-audit JSON | 7 days |
+| `trivy-fs-report-dev` | `trivy-fs` | Trivy filesystem scan table | 7 days |
+| `trivy-image-report-dev` | `trivy-image` | Trivy backend + frontend image scan tables | 7 days |
 
 ---
 
-## Final `dev.yml` Pipeline
+## Security Tool Reference
+
+### Gitleaks
+Scans Git history for hardcoded secrets using pattern matching against known secret formats. Runs against full commit history with `fetch-depth: 0`.
+
+### Bandit
+Open-source SAST tool for Python by the Python Code Quality Authority (PyCQA). Parses source files into an Abstract Syntax Tree and runs security plugins against the code structure rather than doing simple text searches.
+
+### pip-audit
+Audits Python dependencies in `requirements.txt` against the Python Advisory Database for known CVEs.
+
+### npm audit
+Audits Node.js dependencies against the npm security advisory database for known vulnerabilities.
+
+### Trivy (Aqua Security)
+A comprehensive vulnerability scanner covering:
+- `trivy fs` — scans source code, lock files, and config for CVEs before build
+- `trivy image` — scans built Docker images including base image layers and installed OS packages
+
+---
+
+## References
+
+- Security in CI/CD pipelines: https://youtu.be/ZUquwnJnfNw?si=kpxbcQ3MJAyJLy7y
+
+---
+
+## Final dev.yml
 
 ```yaml
 name: Development Pipeline
@@ -430,7 +353,7 @@ on:
     branches: [main]
 
 jobs:
-  # ── SECRET SCANNING ────────────────────────────────────────────────────────
+  # SECRET SCANNING
   gitleaks:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
@@ -445,7 +368,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── SAST ───────────────────────────────────────────────────────────────────
+  # SAST
   sast:
     name: SAST (Bandit)
     runs-on: ubuntu-latest
@@ -475,7 +398,7 @@ jobs:
           path: bandit-report.json
           retention-days: 7
 
-  # ── DEPENDENCY SCAN ────────────────────────────────────────────────────────
+  # DEPENDENCY SCAN
   dependency-scan:
     name: Dependency Vulnerability Scan
     runs-on: ubuntu-latest
@@ -516,7 +439,7 @@ jobs:
             frontend/npm-audit.json
           retention-days: 7
 
-  # ── TRIVY FILESYSTEM SCAN ──────────────────────────────────────────────────
+  # TRIVY FILESYSTEM SCAN
   trivy-fs:
     name: Trivy Filesystem Scan
     runs-on: ubuntu-latest
@@ -543,7 +466,7 @@ jobs:
           path: trivy-fs-results.txt
           retention-days: 7
 
-  # ── BUILD ──────────────────────────────────────────────────────────────────
+  # BUILD
   build:
     name: Build Docker Images
     runs-on: ubuntu-latest
@@ -595,7 +518,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ── TRIVY IMAGE SCAN ───────────────────────────────────────────────────────
+  # TRIVY IMAGE SCAN
   trivy-image:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
@@ -632,13 +555,25 @@ jobs:
             trivy-frontend-image.txt
           retention-days: 7
 
-  # ── DEPLOY ─────────────────────────────────────────────────────────────────
+  # DEPLOY
   deploy:
     name: Deploy to Dev EC2
     runs-on: ubuntu-latest
     environment: development
     needs: trivy-image
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Copy compose files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
+          source: "compose.dev.yml,nginx/"
+          target: "~/shophive"
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
@@ -650,26 +585,15 @@ jobs:
             set -e
             cd ~/shophive
 
-            # Write .env from GitHub secret
             echo "$DEV_ENV_FILE" > .env
 
-            # Snapshot current images for rollback
-            docker tag \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:dev-latest \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:dev-previous 2>/dev/null || true
-
-            docker tag \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:dev-latest \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:dev-previous 2>/dev/null || true
-
-            # Pull new images and restart
-            docker compose pull
-            docker compose up -d --remove-orphans
+            docker compose -f compose.dev.yml pull
+            docker compose -f compose.dev.yml up -d --remove-orphans
             docker image prune -f
         env:
           DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
 
-  # ── HEALTH CHECK ───────────────────────────────────────────────────────────
+  # HEALTH CHECK
   health-check:
     name: Health Check
     runs-on: ubuntu-latest
@@ -686,47 +610,16 @@ jobs:
             echo "Waiting for app to be ready..."
             for i in $(seq 1 12); do
               if curl -sf http://localhost/api/health/ > /dev/null; then
-                echo "✅ Health check passed"
+                echo "Health check passed"
                 exit 0
               fi
               echo "Attempt $i/12 failed, retrying in 10s..."
               sleep 10
             done
-            echo "❌ Health check failed after 2 minutes"
+            echo "Health check failed after 2 minutes"
             exit 1
 
-  # ── ROLLBACK ───────────────────────────────────────────────────────────────
-  rollback:
-    name: Rollback on Failure
-    runs-on: ubuntu-latest
-    environment: development
-    needs: health-check
-    if: failure()
-    steps:
-      - name: Rollback to previous images
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEV_EC2_HOST }}
-          username: ${{ secrets.DEV_EC2_USER }}
-          key: ${{ secrets.DEV_EC2_SSH_KEY }}
-          script: |
-            set -e
-            cd ~/shophive
-
-            echo "⚠️ Rolling back to previous images..."
-
-            docker tag \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:dev-previous \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:dev-latest
-
-            docker tag \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:dev-previous \
-              ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:dev-latest
-
-            docker compose up -d --remove-orphans
-            echo "✅ Rollback complete"
-
-  # ── NOTIFY ─────────────────────────────────────────────────────────────────
+  # NOTIFY
   notify:
     name: Notify on Failure
     runs-on: ubuntu-latest
@@ -740,7 +633,7 @@ jobs:
           webhook-type: incoming-webhook
           payload: |
             {
-              "text": "❌ *Dev pipeline failed*",
+              "text": "Dev pipeline failed",
               "attachments": [
                 {
                   "color": "danger",
@@ -771,31 +664,31 @@ jobs:
             }
 ```
 
+---
 
+## Staging Pipeline
 
+Coming soon.
 
+Will follow the same structure as dev with the following differences:
 
+- Triggers on push to the `staging` branch
+- Deploys to the staging EC2 server using `STAGING_EC2_HOST` and `STAGING_EC2_SSH_KEY`
+- Trivy scans will use `exit-code: 1` to hard-block on HIGH and CRITICAL findings
+- Bandit and pip-audit will also hard-block rather than warn
+- Intended for QA team testing before merge to production
 
-====================
+---
 
+## Production Pipeline
 
-3:29 PM
-Go to your repo on GitHub and follow these steps:
+Coming soon.
 
-Settings → Environments → development → Add secret
+Will follow a different deployment path from dev and staging:
 
-Name:  DEV_ENV_FILE
-Value: (paste your entire .env file contents here)
-Like this:
-
-SECRET_KEY=django-insecure-xxxxxxxxxxxxxxxx
-DEBUG=False
-
-DB_NAME=shophive
-DB_USER=postgres
-DB_PASSWORD=yourpassword
-DB_HOST=postgres
-DB_PORT=5432
-That's it. Just paste the raw .env contents as the secret value — no quotes, no escaping, exactly as the file looks on your local machine.
-
-If you don't have a development environment yet: Settings → Environments → New environment → name it development → then add the secret there.
+- Triggers on Git tags matching `v*.*.*`
+- Images pushed to AWS ECR instead of Docker Hub
+- Deployment via AWS CodeDeploy with a manual approval gate before any traffic shifts
+- Uses `appspec.yml` and `scripts/deploy.sh` for CodeDeploy lifecycle hooks
+- IAM policy scoped to CI user with least-privilege permissions
+- All Trivy, Bandit, and dependency scans hard-block on any HIGH or CRITICAL finding
