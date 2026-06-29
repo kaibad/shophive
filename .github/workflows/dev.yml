@@ -253,10 +253,9 @@ jobs:
         with:
           host: ${{ secrets.DEV_EC2_HOST }}
           username: ${{ secrets.DEV_EC2_USER }}
-          key: ${{ secrets.DEV_EV2_SSH_KEY }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
           script: |
             cd ~/shophive
             ./scripts/dev/healthcheck.sh
-
 
 
