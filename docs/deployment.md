@@ -8,18 +8,18 @@
 
 ShopHive follows a three-environment CI/CD strategy mapped to Git branches and tags:
 
-| Trigger | Environment | Infrastructure |
-|---|---|---|
-| Push to `main` | Development | EC2 Dev Server (Docker Compose) |
-| Merge to `staging` | Staging/QA | EC2 Staging Server (Docker Compose) |
-| Git tag `v*.*.*` + manual approval | Production | AWS ECR + ECS/CodeDeploy |
+| Trigger                            | Environment | Infrastructure                      |
+| ---------------------------------- | ----------- | ----------------------------------- |
+| Push to `main`                     | Development | EC2 Dev Server (Docker Compose)     |
+| Merge to `staging`                 | Staging/QA  | EC2 Staging Server (Docker Compose) |
+| Git tag `v*.*.*` + manual approval | Production  | AWS ECR + ECS/CodeDeploy            |
 
 I created three separate workflow files under `.github/workflows/` to keep each environment's pipeline isolated and independently configurable:
 
 ```
 .github/
 └── workflows/
-    ├── dev.yml          # triggers on push to main
+    ├── dev.yml          # triggers on push to dev
     ├── staging.yml      # triggers on push to staging branch (coming soon)
     └── prod.yml         # triggers on git tag v*.*.* (coming soon)
 ```
@@ -53,25 +53,25 @@ For each environment I go to **Environment → Secrets → Add secret** and add 
 
 ### Full secrets and variables reference
 
-| Secret | Environment |
-|---|---|
-| `DOCKERHUB_USERNAME` | development, staging |
-| `DOCKERHUB_TOKEN` | development, staging |
-| `DEV_EC2_HOST` | development |
-| `DEV_EC2_USER` | development |
-| `DEV_EC2_SSH_KEY` | development |
-| `DEV_ENV_FILE` | development |
-| `SLACK_WEBHOOK_URL` | development |
-| `STAGING_EC2_HOST` | staging |
-| `STAGING_EC2_SSH_KEY` | staging |
-| `AWS_ACCOUNT_ID` | production |
-| `AWS_ACCESS_KEY_ID` | production |
-| `AWS_SECRET_ACCESS_KEY` | production |
-| `CODEDEPLOY_S3_BUCKET` | production |
+| Secret                  | Environment          |
+| ----------------------- | -------------------- |
+| `DOCKERHUB_USERNAME`    | development, staging |
+| `DOCKERHUB_TOKEN`       | development, staging |
+| `DEV_EC2_HOST`          | development          |
+| `DEV_EC2_USER`          | development          |
+| `DEV_EC2_SSH_KEY`       | development          |
+| `DEV_ENV_FILE`          | development          |
+| `SLACK_WEBHOOK_URL`     | development          |
+| `STAGING_EC2_HOST`      | staging              |
+| `STAGING_EC2_SSH_KEY`   | staging              |
+| `AWS_ACCOUNT_ID`        | production           |
+| `AWS_ACCESS_KEY_ID`     | production           |
+| `AWS_SECRET_ACCESS_KEY` | production           |
+| `CODEDEPLOY_S3_BUCKET`  | production           |
 
-| Variable | Environment | Value |
-|---|---|---|
-| `BACKEND_IMAGE` | development | `shophive-backend` |
+| Variable         | Environment | Value               |
+| ---------------- | ----------- | ------------------- |
+| `BACKEND_IMAGE`  | development | `shophive-backend`  |
 | `FRONTEND_IMAGE` | development | `shophive-frontend` |
 
 ---
@@ -80,16 +80,16 @@ For each environment I go to **Environment → Secrets → Add secret** and add 
 
 ### What it does
 
-The dev pipeline triggers on every push to `main`. It runs security scans in parallel, builds Docker images, pushes them to Docker Hub, copies the compose file to the EC2 server via SCP, deploys via SSH, and verifies the app is running with a health check. If anything fails, a Slack notification fires with a direct link to the failed run.
+The dev pipeline triggers on every push to `dev`. It runs security scans in parallel, builds Docker images, pushes them to Docker Hub, copies the compose file to the EC2 server via SCP, deploys via SSH, and verifies the app is running with a health check.
 
 ### Pipeline flow
 
 ```
 gitleaks
 ├── sast
-├── dependency-scan     ──► build ──► trivy-image ──► deploy ──► health-check
-└── trivy-fs                                                           |
-                                                              (fail) notify
+├── dependency-scan     --> build --> trivy-image --> deploy --> health-check
+└── trivy-fs
+
 ```
 
 ---
@@ -160,10 +160,10 @@ I generate a short SHA tag from the first 7 characters of the commit SHA so ever
 
 Each image gets two tags on every build:
 
-| Tag | Purpose |
-|---|---|
+| Tag               | Purpose                                                        |
+| ----------------- | -------------------------------------------------------------- |
 | `dev-<short-sha>` | Immutable — tied to the exact commit, used by Trivy image scan |
-| `dev-latest` | Mutable — always points to the most recent build, used by EC2 |
+| `dev-latest`      | Mutable — always points to the most recent build, used by EC2  |
 
 ---
 
@@ -221,35 +221,7 @@ I never need to manually SSH into the server to update environment variables. I 
 
 After deploy, I SSH back into the EC2 server and poll the `/api/health/` endpoint up to 12 times with a 10-second wait between each attempt — 2 minutes total.
 
-If the endpoint responds with HTTP 200, the health check passes and the pipeline succeeds. If it never responds after 2 minutes, the job exits with code 1 which triggers the `notify` job.
-
-This requires a health endpoint in Django:
-
-```python
-# urls.py
-from django.http import JsonResponse
-
-def health(request):
-    return JsonResponse({"status": "ok"})
-
-urlpatterns = [
-    path("api/health/", health),
-    ...
-]
-```
-
----
-
-#### notify — Slack Failure Notification
-
-This job runs `if: failure()` and lists all other jobs in its `needs` array. If anything in the pipeline fails — any scan, the build, the deploy, or the health check — this job fires a Slack message containing:
-
-- Repository name
-- Branch name
-- Who triggered the run
-- Direct link to the failed Actions run
-
-I never need to check GitHub manually to know when a deploy broke.
+If the endpoint responds with HTTP 200, the health check passes and the pipeline succeeds. If it never responds after 2 minutes, the job exits with code 1.
 
 ---
 
@@ -284,7 +256,7 @@ The `.env` file does not need to be placed on the server manually — the pipeli
 
 I maintain two compose files:
 
-- `docker-compose.yml` — used locally, contains `build:` contexts for backend and frontend so I can build and test locally
+- `compose.yml` — used locally, contains `build:` contexts for backend and frontend so I can build and test locally
 - `compose.dev.yml` — used on EC2, references pre-built Docker Hub images instead of building
 
 ```yaml
@@ -307,31 +279,37 @@ When `docker compose up` runs on EC2, postgres, nginx, and volume-init are all p
 
 Every run produces downloadable scan reports under the Artifacts section of the Actions run page.
 
-| Artifact | Job | Contents | Retention |
-|---|---|---|---|
-| `bandit-report-dev` | `sast` | Bandit JSON report | 7 days |
-| `dependency-report-dev` | `dependency-scan` | pip-audit JSON + npm-audit JSON | 7 days |
-| `trivy-fs-report-dev` | `trivy-fs` | Trivy filesystem scan table | 7 days |
-| `trivy-image-report-dev` | `trivy-image` | Trivy backend + frontend image scan tables | 7 days |
+| Artifact                 | Job               | Contents                                   | Retention |
+| ------------------------ | ----------------- | ------------------------------------------ | --------- |
+| `bandit-report-dev`      | `sast`            | Bandit JSON report                         | 7 days    |
+| `dependency-report-dev`  | `dependency-scan` | pip-audit JSON + npm-audit JSON            | 7 days    |
+| `trivy-fs-report-dev`    | `trivy-fs`        | Trivy filesystem scan table                | 7 days    |
+| `trivy-image-report-dev` | `trivy-image`     | Trivy backend + frontend image scan tables | 7 days    |
 
 ---
 
 ## Security Tool Reference
 
 ### Gitleaks
+
 Scans Git history for hardcoded secrets using pattern matching against known secret formats. Runs against full commit history with `fetch-depth: 0`.
 
 ### Bandit
+
 Open-source SAST tool for Python by the Python Code Quality Authority (PyCQA). Parses source files into an Abstract Syntax Tree and runs security plugins against the code structure rather than doing simple text searches.
 
 ### pip-audit
+
 Audits Python dependencies in `requirements.txt` against the Python Advisory Database for known CVEs.
 
 ### npm audit
+
 Audits Node.js dependencies against the npm security advisory database for known vulnerabilities.
 
 ### Trivy (Aqua Security)
+
 A comprehensive vulnerability scanner covering:
+
 - `trivy fs` — scans source code, lock files, and config for CVEs before build
 - `trivy image` — scans built Docker images including base image layers and installed OS packages
 
@@ -346,80 +324,80 @@ A comprehensive vulnerability scanner covering:
 ## Final dev.yml
 
 ```yaml
-name: Development Pipeline
+name: Development pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
 
 jobs:
   # SECRET SCANNING
   gitleaks:
     name: Secret Scan (Gitleaks)
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
 
-  # SAST
+  # SAST AND DEPENDENCY SECURITY
   sast:
     name: SAST (Bandit)
     runs-on: ubuntu-latest
     needs: gitleaks
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
       - name: Install Bandit
-        run: pip install bandit
+        run: |
+          pip install bandit
 
       - name: Run Bandit
         run: |
-          bandit -r backend -f json -o bandit-report.json \
-            --severity-level medium --confidence-level medium || true
+          bandit -r backend -f json -o bandit-report.json --severity-level medium --confidence-level medium || true
 
-      - name: Upload Bandit report
-        uses: actions/upload-artifact@v4
-        if: always()
+      - name: Upload Bandit Report
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-report-dev
           path: bandit-report.json
           retention-days: 7
 
-  # DEPENDENCY SCAN
   dependency-scan:
     name: Dependency Vulnerability Scan
     runs-on: ubuntu-latest
     needs: gitleaks
+
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: pip-audit
+      - name: pip audit
         run: |
           pip install pip-audit
-          pip-audit -r backend/requirements.txt --format json \
-            --output pip-audit.json || true
+          pip-audit -r backend/requirements.txt --format json --output pip-audit.json || true
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
 
@@ -430,8 +408,7 @@ jobs:
           npm audit --audit-level high --json > npm-audit.json || true
 
       - name: Upload dependency reports
-        uses: actions/upload-artifact@v4
-        if: always()
+        uses: actions/upload-artifact@v7
         with:
           name: dependency-report-dev
           path: |
@@ -439,17 +416,16 @@ jobs:
             frontend/npm-audit.json
           retention-days: 7
 
-  # TRIVY FILESYSTEM SCAN
   trivy-fs:
-    name: Trivy Filesystem Scan
+    name: Trivy filesystem Scan
     runs-on: ubuntu-latest
     needs: gitleaks
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -458,17 +434,16 @@ jobs:
           exit-code: 0
           output: trivy-fs-results.txt
 
-      - name: Upload Trivy FS report
-        uses: actions/upload-artifact@v4
+      - name: Upload Trivy Fs Report
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy-fs-report-dev
           path: trivy-fs-results.txt
           retention-days: 7
 
-  # BUILD
   build:
-    name: Build Docker Images
+    name: Build Docker Image and push to doker hub
     runs-on: ubuntu-latest
     environment: development
     needs:
@@ -476,57 +451,56 @@ jobs:
       - dependency-scan
       - trivy-fs
     outputs:
-      tag: ${{ steps.version.outputs.tag }}
+      tag: ${{ steps.version.outputs.tag}}
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Generate image tag
+      - name: Generate Image Tag
         id: version
         run: |
           SHORT_SHA=${GITHUB_SHA::7}
           echo "tag=dev-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Docker Login
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{secrets.DOCKERHUB_USERNAME}}
+          password: ${{secrets.DOCKERHUB_TOKEN}}
 
       - name: Setup Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
+      - name: Build and push Backend Image
+        uses: docker/build-push-action@v7
         with:
           context: ./backend
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:dev-latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:latest-dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
+      - name: Build and Push Frontend Image
+        uses: docker/build-push-action@v7
         with:
           context: ./frontend
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:dev-latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-dev
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # TRIVY IMAGE SCAN
   trivy-image:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
     environment: development
     needs: build
     steps:
-      - name: Scan backend image
-        uses: aquasecurity/trivy-action@0.28.0
+      - name: Scan Backend Image
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
@@ -535,8 +509,8 @@ jobs:
           exit-code: 0
           output: trivy-backend-image.txt
 
-      - name: Scan frontend image
-        uses: aquasecurity/trivy-action@0.28.0
+      - name: Scan Frontend Image
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: image
           image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
@@ -545,8 +519,8 @@ jobs:
           exit-code: 0
           output: trivy-frontend-image.txt
 
-      - name: Upload Trivy image reports
-        uses: actions/upload-artifact@v4
+      - name: Upload Trivy Fs Report
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy-image-report-dev
@@ -554,13 +528,12 @@ jobs:
             trivy-backend-image.txt
             trivy-frontend-image.txt
           retention-days: 7
-
-  # DEPLOY
   deploy:
-    name: Deploy to Dev EC2
+    name: Deployment to the Development Server
     runs-on: ubuntu-latest
+    needs:
+      - trivy-image
     environment: development
-    needs: trivy-image
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -571,7 +544,7 @@ jobs:
           host: ${{ secrets.DEV_EC2_HOST }}
           username: ${{ secrets.DEV_EC2_USER }}
           key: ${{ secrets.DEV_EC2_SSH_KEY }}
-          source: "compose.dev.yml,nginx/"
+          source: "compose.dev.yml,nginx/,scripts/"
           target: "~/shophive"
 
       - name: Deploy via SSH
@@ -593,9 +566,8 @@ jobs:
         env:
           DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
 
-  # HEALTH CHECK
   health-check:
-    name: Health Check
+    name: Health check
     runs-on: ubuntu-latest
     environment: development
     needs: deploy
@@ -607,61 +579,8 @@ jobs:
           username: ${{ secrets.DEV_EC2_USER }}
           key: ${{ secrets.DEV_EC2_SSH_KEY }}
           script: |
-            echo "Waiting for app to be ready..."
-            for i in $(seq 1 12); do
-              if curl -sf http://localhost/api/health/ > /dev/null; then
-                echo "Health check passed"
-                exit 0
-              fi
-              echo "Attempt $i/12 failed, retrying in 10s..."
-              sleep 10
-            done
-            echo "Health check failed after 2 minutes"
-            exit 1
-
-  # NOTIFY
-  notify:
-    name: Notify on Failure
-    runs-on: ubuntu-latest
-    needs: [gitleaks, sast, dependency-scan, trivy-fs, build, trivy-image, deploy, health-check]
-    if: failure()
-    steps:
-      - name: Send Slack notification
-        uses: slackapi/slack-github-action@v2.1.0
-        with:
-          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-          webhook-type: incoming-webhook
-          payload: |
-            {
-              "text": "Dev pipeline failed",
-              "attachments": [
-                {
-                  "color": "danger",
-                  "fields": [
-                    {
-                      "title": "Repository",
-                      "value": "${{ github.repository }}",
-                      "short": true
-                    },
-                    {
-                      "title": "Branch",
-                      "value": "${{ github.ref_name }}",
-                      "short": true
-                    },
-                    {
-                      "title": "Triggered by",
-                      "value": "${{ github.actor }}",
-                      "short": true
-                    },
-                    {
-                      "title": "Run URL",
-                      "value": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                      "short": false
-                    }
-                  ]
-                }
-              ]
-            }
+            cd ~/shophive
+            ./scripts/dev/healthcheck.sh
 ```
 
 ---

@@ -2,7 +2,7 @@ name: Development pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [dev]
 
 jobs:
   # SECRET SCANNING
@@ -34,7 +34,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.13'
+          python-version: "3.13"
 
       - name: Install Bandit
         run: |
@@ -69,7 +69,6 @@ jobs:
         run: |
           pip install pip-audit
           pip-audit -r backend/requirements.txt --format json --output pip-audit.json || true
-
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -117,7 +116,6 @@ jobs:
           path: trivy-fs-results.txt
           retention-days: 7
 
-  
   build:
     name: Build Docker Image and push to doker hub
     runs-on: ubuntu-latest
@@ -169,7 +167,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  trivy-image: 
+  trivy-image:
     name: Trivy Image Scan
     runs-on: ubuntu-latest
     environment: development
@@ -257,5 +255,3 @@ jobs:
           script: |
             cd ~/shophive
             ./scripts/dev/healthcheck.sh
-
-
