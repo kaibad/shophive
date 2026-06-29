@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { authFetch } from "../utils/auth";
 import { useCart } from "../context/CartContext";
+import BASEURL from "../config.js";
 
 function CheckoutPage() {
   const [form, setForm] = useState({
@@ -14,7 +15,6 @@ function CheckoutPage() {
 
   const nav = useNavigate();
   const { clearCart, total } = useCart();
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 
   const handleChange = (e) =>
     setForm({ ...form, [e.target.name]: e.target.value });
@@ -68,7 +68,10 @@ function CheckoutPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="name" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="name"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Full Name
               </label>
               <input
@@ -83,7 +86,10 @@ function CheckoutPage() {
             </div>
 
             <div>
-              <label htmlFor="address" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="address"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Delivery Address
               </label>
               <input
@@ -98,7 +104,10 @@ function CheckoutPage() {
             </div>
 
             <div>
-              <label htmlFor="phone" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="phone"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Phone Number
               </label>
               <input
@@ -113,7 +122,10 @@ function CheckoutPage() {
             </div>
 
             <div>
-              <label htmlFor="payment_method" className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label
+                htmlFor="payment_method"
+                className="mb-1.5 block text-sm font-medium text-slate-700"
+              >
                 Payment Method
               </label>
               <select

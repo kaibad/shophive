@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import ProductCard from "../components/ProductCard";
+import BASEURL from "../config.js";
 
 const CATEGORIES = [
   "Headphones",
@@ -13,7 +14,6 @@ const CATEGORIES = [
 
 function Home() {
   const [products, setProducts] = useState([]);
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 
   useEffect(() => {
     fetch(`${BASEURL}/api/products/`)

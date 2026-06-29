@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import ProductCard from "../components/ProductCard.jsx";
 import LoadingSpinner from "../components/LoadingSpinner.jsx";
 import EmptyState from "../components/EmptyState.jsx";
+import BASEURL from "../config.js";
 
 function ProductList() {
   const [products, setProducts] = useState([]);
@@ -12,8 +13,6 @@ function ProductList() {
 
   const query = searchParams.get("q")?.toLowerCase() || "";
   const category = searchParams.get("category")?.toLowerCase() || "";
-
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
 
   useEffect(() => {
     fetch(`${BASEURL}/api/products/`)

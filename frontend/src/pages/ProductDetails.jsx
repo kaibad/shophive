@@ -3,11 +3,11 @@ import { useEffect, useState } from "react";
 import { useCart } from "../context/CartContext";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
+import BASEURL from "../config.js";
 
 function ProductDetails() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const BASEURL = import.meta.env.VITE_DJANGO_BASE_URL;
   const [product, setProduct] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -54,7 +54,11 @@ function ProductDetails() {
     return (
       <main className="page-main px-4">
         <div className="mx-auto max-w-3xl">
-          <EmptyState icon="⚠️" title="Could not load product" description={error} />
+          <EmptyState
+            icon="⚠️"
+            title="Could not load product"
+            description={error}
+          />
         </div>
       </main>
     );
@@ -64,7 +68,11 @@ function ProductDetails() {
     return (
       <main className="page-main px-4">
         <div className="mx-auto max-w-3xl">
-          <EmptyState icon="🔍" title="Product not found" description="This item may have been removed." />
+          <EmptyState
+            icon="🔍"
+            title="Product not found"
+            description="This item may have been removed."
+          />
         </div>
       </main>
     );
