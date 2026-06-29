@@ -220,7 +220,7 @@ jobs:
           host: ${{ secrets.DEV_EC2_HOST }}
           username: ${{ secrets.DEV_EC2_USER }}
           key: ${{ secrets.DEV_EC2_SSH_KEY }}
-          source: "compose.dev.yml,nginx/"
+          source: "compose.dev.yml,nginx/,scripts/"
           target: "~/shophive"
 
       - name: Deploy via SSH
@@ -241,4 +241,22 @@ jobs:
             docker image prune -f
         env:
           DEV_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
+
+  health-check:
+    name: Health check
+    runs-on: ubuntu-latest
+    environment: development
+    needs: deploy
+    steps:
+      - name: Check app health
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EV2_SSH_KEY }}
+        script: |
+          cd ~/shophive
+          ./scripts/dev/healthcheck.sh
+
+
 
