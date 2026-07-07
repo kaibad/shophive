@@ -4,6 +4,10 @@ on:
   push:
     branches: [qa]
 
+permissions:
+  contents: read
+  id-token: write # required for cosign keyless signing via GitHub OIDC
+
 jobs:
   # SECRET SCANNING
   gitleaks:
@@ -246,6 +250,9 @@ jobs:
     name: Generate SBOM and Sign Images
     runs-on: ubuntu-latest
     environment: staging
+    permissions:
+      contents: read
+      id-token: write
     needs:
       - build
       - trivy-image
