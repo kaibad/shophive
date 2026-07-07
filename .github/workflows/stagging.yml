@@ -130,13 +130,13 @@ jobs:
           fetch-depth: 0 # SonarCloud needs full history for new-code analysis
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@v4
+        uses: SonarSource/sonarqube-scan-action@v8.2.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         with:
           args: >
             -Dsonar.organization=${{ vars.SONAR_ORG_KEY }}
-            -Dsonar.projectKey= ${{ vars.SONAR_PROJECT_KEY }}
+            -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
             -Dsonar.host.url=https://sonarcloud.io
 
       - name: SonarQube Quality Gate Check
