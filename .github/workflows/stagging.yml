@@ -1,0 +1,144 @@
+name: Staging pipeline
+
+on:
+  push:
+    branches: [qa]
+
+
+jobs:
+  # SECRET SCANNING
+  gitleaks:
+    name: Secret Scan (Gitleaks)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+
+  # SAST AND DEPENDENCY SECURITY
+  sast:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    needs: gitleaks
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Bandit
+        run: |
+          pip install bandit
+
+      - name: Run Bandit
+        run: |
+          bandit -r backend -f json -o bandit-report.json --severity-level medium --confidence-level medium
+
+      - name: Upload Bandit Report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bandit-report-staging
+          path: bandit-report.json
+          retention-days: 14
+
+  dependency-scan:
+    name: Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: gitleaks
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: pip audit
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt --format json --output pip-audit.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: npm audit
+        working-directory: frontend
+        run: |
+          npm install
+          npm audit --audit-level high --json > npm-audit.json
+
+      - name: Upload dependency reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dependency-report-staging
+          path: |
+            pip-audit.json
+            frontend/npm-audit.json
+          retention-days: 14
+
+  trivy-fs:
+    name: Trivy filesystem Scan
+    runs-on: ubuntu-latest
+    needs: gitleaks
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Run Trivy FS scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: HIGHT,CRITICAL
+          exit-code: 1
+          output: trivy-fs-result.txt
+
+      - name: Upload Trivy FS report
+        uses: actions/upload-artifacts@v7
+        if: always()
+        with:
+          name: trivy-fs-report-staging
+          path: trivy-fs-results.txt
+          retention-days: 14
+
+
+  # CODE QUALITY GATE
+  sonarqube:
+    name: onarQube Analysis + Quality Gate
+    runs-on: ubuntu-latest
+    needs: gitleaks
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: SonarQube Scan
+        uses: sonarqube/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{secrets.SONAR_TOKEN}}
+          SONAR_HOST_URL: ${{secrets.SONAR_HOST_URL}}
+
+      - name: SonarQube Quality Gate Check
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

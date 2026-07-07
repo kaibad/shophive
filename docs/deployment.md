@@ -591,7 +591,7 @@ Coming soon.
 
 Will follow the same structure as dev with the following differences:
 
-- Triggers on push to the `staging` branch
+- Triggers on push to the `qa` branch
 - Deploys to the staging EC2 server using `STAGING_EC2_HOST` and `STAGING_EC2_SSH_KEY`
 - Trivy scans will use `exit-code: 1` to hard-block on HIGH and CRITICAL findings
 - Bandit and pip-audit will also hard-block rather than warn
