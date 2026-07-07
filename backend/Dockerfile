@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM dhi.io/python:3.13-alpine3.21-dev AS builder
+FROM dhi.io/python:3.13-alpine3.22-dev AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -7,7 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN python -m venv /app/venv
+RUN apk update && apk upgrade && \
+    python -m venv /app/venv
+    
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
     pip uninstall pip -y  
