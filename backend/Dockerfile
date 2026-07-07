@@ -27,8 +27,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-RUN apk update && apk upgrade
-
 COPY --from=builder --chown=65532:65532 /app/staticfiles /app/staticfiles
 
 COPY --from=builder /app/venv /app/venv
