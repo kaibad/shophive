@@ -205,3 +205,39 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-staging
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: build
+    steps:
+      - name: Scan Backend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-backend-image.txt
+
+      - name: Scan Frontend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-frontend-image.txt
+
+      - name: Upload Trivy Image Reports
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: trivy-image-report-staging
+          path: |
+            trivy-backend-image.txt
+            trivy-frontend-image.txt
+          retention-days: 14
