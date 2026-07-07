@@ -597,6 +597,451 @@ Will follow the same structure as dev with the following differences:
 - Bandit and pip-audit will also hard-block rather than warn
 - Intended for QA team testing before merge to production
 
+# Fixing npm Audit Vulnerabilities in Staging Pipeline
+
+## Problem
+
+The GitHub Actions staging pipeline was failing in the dependency security scan step.
+
+The failure was caused by:
+
+```bash
+npm audit --audit-level high --json > npm-audit.json
+```
+
+The command returned exit code `1` because high-severity vulnerabilities were detected.
+
+Pipeline error:
+
+```
+12 vulnerabilities (1 low, 4 moderate, 7 high)
+
+Error: Process completed with exit code 1.
+```
+
+Since the pipeline was configured as a security gate, the build failed correctly when high vulnerabilities were found.
+
+---
+
+# Investigation Process
+
+## 1. Downloaded npm audit report from GitHub Actions artifacts
+
+The workflow was already generating an audit report:
+
+```
+frontend/npm-audit.json
+```
+
+The artifact was downloaded from the failed GitHub Actions run and analyzed.
+
+The audit report showed:
+
+```json
+{
+  "high": 7,
+  "moderate": 4,
+  "low": 1,
+  "critical": 0,
+  "total": 12
+}
+```
+
+---
+
+# 2. Identified vulnerable dependencies
+
+The main vulnerable packages were:
+
+## Direct dependencies
+
+### react-router-dom
+
+Current version:
+
+```
+react-router-dom@7.9.5
+```
+
+Affected range:
+
+```
+7.0.0 - 7.11.0
+```
+
+Severity:
+
+```
+High
+```
+
+---
+
+### vite
+
+Current version:
+
+```
+vite@7.1.7
+```
+
+Affected range:
+
+```
+7.0.0 - 7.3.3
+```
+
+Severity:
+
+```
+High
+```
+
+---
+
+## Transitive dependencies
+
+Other vulnerable packages:
+
+```
+flatted
+minimatch
+picomatch
+rollup
+brace-expansion
+ajv
+js-yaml
+@babel/core
+```
+
+These were not installed directly. They came from other dependencies.
+
+---
+
+# 3. Checked installed package versions
+
+Ran:
+
+```bash
+npm list react-router-dom react-router vite rollup
+```
+
+Initially the dependency tree was empty because dependencies were not installed.
+
+After running:
+
+```bash
+npm install
+```
+
+Checked:
+
+```bash
+npm list --depth=0
+```
+
+Output showed:
+
+```
+react-router-dom@7.9.5
+vite@7.2.2
+```
+
+These versions were still inside the vulnerable ranges.
+
+---
+
+# 4. Updated dependencies
+
+Checked available versions:
+
+```bash
+npm view react-router-dom version
+npm view vite version
+```
+
+Output:
+
+```
+react-router-dom: 7.18.1
+vite: 8.1.3
+```
+
+Updated:
+
+```bash
+npm install react-router-dom@latest vite@latest
+```
+
+This reduced vulnerabilities:
+
+Before:
+
+```
+12 vulnerabilities
+7 high
+```
+
+After update:
+
+```
+6 vulnerabilities
+2 high
+```
+
+---
+
+# 5. Vite 8 dependency conflict
+
+After upgrading Vite to version 8, npm reported peer dependency conflicts.
+
+Error:
+
+```
+Could not resolve dependency:
+
+peer vite "^5.2.0 || ^6 || ^7"
+from @tailwindcss/vite@4.1.17
+```
+
+Reason:
+
+```
+@tailwindcss/vite@4.1.17
+and
+@vitejs/plugin-react@5.1.0
+
+did not support Vite 8 yet.
+```
+
+---
+
+# 6. Downgraded Vite to supported version
+
+Installed the latest compatible Vite 7 release:
+
+```bash
+npm install vite@7.3.6
+```
+
+---
+
+# 7. Regenerated dependency tree
+
+The old package-lock.json contained vulnerable dependency versions.
+
+Removed old dependencies:
+
+```bash
+rm -rf node_modules package-lock.json
+```
+
+Installed fresh dependencies:
+
+```bash
+npm install
+```
+
+This regenerated:
+
+```
+node_modules/
+package-lock.json
+```
+
+with updated dependency versions.
+
+---
+
+# 8. Verified security status
+
+Ran:
+
+```bash
+npm audit
+```
+
+Result:
+
+```
+found 0 vulnerabilities
+```
+
+Then ran:
+
+```bash
+npm audit fix
+npm audit
+```
+
+Result:
+
+```
+up to date, audited 171 packages
+
+found 0 vulnerabilities
+```
+
+---
+
+# Final Result
+
+Before:
+
+```
+12 vulnerabilities
+
+High:       7
+Moderate:   4
+Low:        1
+Critical:   0
+```
+
+After:
+
+```
+0 vulnerabilities
+```
+
+---
+
+# Changes Made
+
+## Dependency changes
+
+- Updated `react-router-dom`
+- Updated `vite`
+- Regenerated `package-lock.json`
+- Updated transitive dependencies automatically
+
+## Commands used
+
+```bash
+npm audit
+
+npm list --depth=0
+
+npm view react-router-dom version
+npm view vite version
+
+npm install react-router-dom@latest vite@latest
+
+npm install vite@7.3.6
+
+rm -rf node_modules package-lock.json
+
+npm install
+
+npm audit fix
+
+npm audit
+```
+
+---
+
+# Verification
+
+The dependency security scan in GitHub Actions should now pass because:
+
+```bash
+npm audit --audit-level high
+```
+
+returns exit code:
+
+```
+0
+```
+
+and no high-severity vulnerabilities remain.
+
+# SonarCloud Integration
+
+SonarCloud is integrated into the GitHub Actions staging pipeline for static code analysis and quality gate validation. It helps detect bugs, vulnerabilities, code smells, and maintainability issues.
+
+## Setup
+
+1. Login to SonarCloud using GitHub and import the repository.
+
+2. Get the following values from SonarCloud:
+
+SONAR_ORG_KEY
+SONAR_PROJECT_KEY
+
+3. Generate a SonarCloud token:
+
+SonarCloud → Profile → My Account → Security → Generate Token
+
+Add the generated token to GitHub repository secrets:
+
+SONAR_TOKEN
+
+4. Add GitHub repository variables:
+
+SONAR_ORG_KEY=<your organization key>
+
+SONAR_PROJECT_KEY=<your project key>
+
+Path:
+
+Repository Settings → Secrets and variables → Actions → Variables
+
+## GitHub Actions Configuration
+
+```yaml
+- name: SonarCloud Scan
+  uses: SonarSource/sonarqube-scan-action@v4
+  env:
+    SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  with:
+    args: >
+      -Dsonar.organization=${{ vars.SONAR_ORG_KEY }}
+      -Dsonar.projectKey=${{ vars.SONAR_PROJECT_KEY }}
+      -Dsonar.host.url=https://sonarcloud.io
+
+- name: SonarCloud Quality Gate Check
+  uses: SonarSource/sonarqube-quality-gate-action@v1
+  timeout-minutes: 5
+  env:
+    SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+Pipeline Flow
+Developer Push
+      |
+      v
+GitHub Actions Runner
+      |
+      v
+SonarCloud Analysis
+      |
+      v
+Quality Gate Result
+```
+
+Turn off automatic analysis
+Turn off automatic analysis before configuring this project for CI-based analysis.
+
+i was wrong before the sonar token was not the pat it was th project token,,,, we have to go tto adminstration and then analysis method to gain the token and use it
+
+
+i have another issue in sonarqube 
+
+check is project permission, not the token.
+there were no prior permission i checked all permissions
+
+Go to:
+
+SonarCloud
+ → shophive project
+ → Administration
+ → Permissions
+
+
+
+
+
+
+
+
 ---
 
 ## Production Pipeline
@@ -611,3 +1056,4 @@ Will follow a different deployment path from dev and staging:
 - Uses `appspec.yml` and `scripts/deploy.sh` for CodeDeploy lifecycle hooks
 - IAM policy scoped to CI user with least-privilege permissions
 - All Trivy, Bandit, and dependency scans hard-block on any HIGH or CRITICAL finding
+```
