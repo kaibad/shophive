@@ -344,8 +344,8 @@ jobs:
 
             echo "$STAGING_ENV_FILE" > .env
 
-            docker compose -f compose.staging.yml pull
-            docker compose -f compose.staging.yml up -d --remove-orphans
+            docker compose -f compose.stag.yml pull
+            docker compose -f compose.stag.yml up -d --remove-orphans
             docker image prune -f
         env:
           STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
