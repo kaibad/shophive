@@ -21,7 +21,7 @@ function Signup() {
     setMsg("");
     setLoading(true);
     try {
-      const res = await fetch(`${BASE}/api/register/`, {
+      const res = await fetch(`${BASEURL}/api/register/`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
