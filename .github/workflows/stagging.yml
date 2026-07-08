@@ -300,3 +300,52 @@ jobs:
         run: |
           cosign sign --yes \
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}@${{ needs.build.outputs.frontend_digest }}
+
+  # MANUAL APPROVAL GATE
+  approval:
+    name: Manual Approval for Staging Deploy
+    runs-on: ubuntu-latest
+    needs:
+      - trivy-image
+      - sbom-and-sign
+    environment: staging-deploy-approval
+    steps:
+      - name: Approval checkpoint
+        run: echo "Approved for staging deployment."
+
+  deploy:
+    name: Deployment to the Staging Server
+    runs-on: ubuntu-latest
+    needs: approval
+    environment: staging
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Copy compose files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_EC2_HOST }}
+          username: ${{ secrets.STAGING_EC2_USER }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+          source: "compose.stag.yml,nginx/,scripts/"
+          target: "~/shophive"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_EC2_HOST }}
+          username: ${{ secrets.STAGING_EC2_USER }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+          envs: STAGING_ENV_FILE
+          script: |
+            set -e
+            cd ~/shophive
+
+            echo "$STAGING_ENV_FILE" > .env
+
+            docker compose -f compose.staging.yml pull
+            docker compose -f compose.staging.yml up -d --remove-orphans
+            docker image prune -f
+        env:
+          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
