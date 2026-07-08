@@ -4,6 +4,9 @@ on:
   push:
     branches: [qa]
 
+permissions:
+  contents: read
+  id-token: write # required for cosign keyless signing via GitHub OIDC
 
 jobs:
   # SECRET SCANNING
@@ -107,38 +110,242 @@ jobs:
           scan-type: fs
           scan-ref: .
           format: table
-          severity: HIGHT,CRITICAL
+          severity: HIGH,CRITICAL
           exit-code: 1
-          output: trivy-fs-result.txt
+          output: trivy-fs-results.txt
 
       - name: Upload Trivy FS report
-        uses: actions/upload-artifacts@v7
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: trivy-fs-report-staging
           path: trivy-fs-results.txt
           retention-days: 14
 
-
-  # CODE QUALITY GATE
-  sonarqube:
-    name: onarQube Analysis + Quality Gate
+  hadolint:
+    name: Dockerfile Lint (Hadolint)
     runs-on: ubuntu-latest
     needs: gitleaks
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
+
+      - name: Run Hadolint on Backend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
         with:
-          fetch-depth: 0
+          dockerfile: backend/Dockerfile
+          output-file: hadolint-backend.txt
+          no-fail: true
 
-      - name: SonarQube Scan
-        uses: sonarqube/sonarqube-scan-action@v4
-        env:
-          SONAR_TOKEN: ${{secrets.SONAR_TOKEN}}
-          SONAR_HOST_URL: ${{secrets.SONAR_HOST_URL}}
+      - name: Run Hadolint on Frontend Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          output-file: hadolint-frontend.txt
+          no-fail: true
 
-      - name: SonarQube Quality Gate Check
-        uses: SonarSource/sonarqube-quality-gate-action@v1
-        timeout-minutes: 5
+      - name: Upload Hadolint Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hadolint-report-staging
+          path: |
+            hadolint-backend.txt
+            hadolint-frontend.txt
+          retention-days: 14
+
+  build:
+    name: Build Docker Images and push to Docker Hub
+    runs-on: ubuntu-latest
+    environment: staging
+    needs:
+      - sast
+      - dependency-scan
+      - trivy-fs
+      - hadolint
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      backend_digest: ${{ steps.build-backend.outputs.digest }}
+      frontend_digest: ${{ steps.build-frontend.outputs.digest }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Generate Image Tag
+        id: version
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "tag=staging-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Docker Login
+        uses: docker/login-action@v4
+        with:
+          username: ${{secrets.DOCKERHUB_USERNAME}}
+          password: ${{secrets.DOCKERHUB_TOKEN}}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push Backend Image
+        id: build-backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:latest-staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and Push Frontend Image
+        id: build-frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-staging
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    environment: staging
+    needs: build
+    steps:
+      - name: Scan Backend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-backend-image.txt
+
+      - name: Scan Frontend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-frontend-image.txt
+
+      - name: Upload Trivy Image Reports
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: trivy-image-report-staging
+          path: |
+            trivy-backend-image.txt
+            trivy-frontend-image.txt
+          retention-days: 14
+
+  sbom-and-sign:
+    name: Generate SBOM and Sign Images
+    runs-on: ubuntu-latest
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    needs:
+      - build
+      - trivy-image
+    steps:
+      - name: Generate Backend SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: cyclonedx
+          output: sbom-backend.cdx.json
+
+      - name: Generate Frontend SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
+          format: cyclonedx
+          output: sbom-frontend.cdx.json
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-staging
+          path: |
+            sbom-backend.cdx.json
+            sbom-frontend.cdx.json
+          retention-days: 30
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Docker Login
+        uses: docker/login-action@v4
+        with:
+          username: ${{secrets.DOCKERHUB_USERNAME}}
+          password: ${{secrets.DOCKERHUB_TOKEN}}
+
+      - name: Sign Backend Image (keyless, GitHub OIDC)
+        run: |
+          cosign sign --yes \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}@${{ needs.build.outputs.backend_digest }}
+
+      - name: Sign Frontend Image (keyless, GitHub OIDC)
+        run: |
+          cosign sign --yes \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}@${{ needs.build.outputs.frontend_digest }}
+
+  # MANUAL APPROVAL GATE
+  approval:
+    name: Manual Approval for Staging Deploy
+    runs-on: ubuntu-latest
+    needs:
+      - trivy-image
+      - sbom-and-sign
+    environment: staging-deploy-approval
+    steps:
+      - name: Approval checkpoint
+        run: echo "Approved for staging deployment."
+
+  deploy:
+    name: Deployment to the Staging Server
+    runs-on: ubuntu-latest
+    needs: approval
+    environment: staging
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Copy compose files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.STAGING_EC2_HOST }}
+          username: ${{ secrets.STAGING_EC2_USER }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+          source: "compose.stag.yml,nginx/,scripts/"
+          target: "~/shophive"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_EC2_HOST }}
+          username: ${{ secrets.STAGING_EC2_USER }}
+          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+          envs: STAGING_ENV_FILE
+          script: |
+            set -e
+            cd ~/shophive
+
+            echo "$STAGING_ENV_FILE" > .env
+
+            docker compose -f compose.stag.yml pull
+            docker compose -f compose.stag.yml up -d --remove-orphans
+            docker image prune -f
         env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}

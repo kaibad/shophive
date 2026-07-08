@@ -1,0 +1,43 @@
+name: Validate PR Source Branch
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  validate-source:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate source branch
+        run: |
+          BASE="${{ github.base_ref }}"
+          HEAD="${{ github.head_ref }}"
+
+          echo "Base: $BASE"
+          echo "Head: $HEAD"
+
+          case "$BASE" in
+            dev)
+              if [[ ! "$HEAD" =~ ^feature/ ]] && \
+                 [[ ! "$HEAD" =~ ^bugfix/ ]] && \
+                 [[ ! "$HEAD" =~ ^hotfix/ ]]; then
+                echo "::error::Only feature/*, bugfix/*, or hotfix/* branches can merge into dev."
+                exit 1
+              fi
+              ;;
+            qa)
+              if [ "$HEAD" != "dev" ]; then
+                echo "::error::Only dev can merge into qa."
+                exit 1
+              fi
+              ;;
+            main)
+              if [ "$HEAD" != "qa" ]; then
+                echo "::error::Only qa can merge into main."
+                exit 1
+              fi
+              ;;
+          esac
+
+          echo "Validation passed."
