@@ -18,13 +18,13 @@ All detailed documentation is maintained inside the `docs/` directory.
 
 Explains how to set up the development environment locally, including:
 
-* Required software installation
-* Environment variable configuration
-* Backend setup
-* Frontend setup
-* Database configuration
-* Running the application locally
-* Development workflow
+- Required software installation
+- Environment variable configuration
+- Backend setup
+- Frontend setup
+- Database configuration
+- Running the application locally
+- Development workflow
 
 ---
 
@@ -54,7 +54,7 @@ Explains containerization strategy, Dockerfiles, Docker images, containers, and 
 
 ## Deployment
 
-[Deployment Documentation](./docs/deployment.md)
+[Deployment Documentation](./docs/cicd)
 
 Explains application deployment processes, environments, and production deployment workflow.
 
@@ -128,4 +128,3 @@ docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 Refer to the documentation guides above for detailed setup and deployment instructions.
-
