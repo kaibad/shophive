@@ -9,297 +9,71 @@ permissions:
   id-token: write # required for cosign keyless signing via GitHub OIDC
 
 jobs:
-  # SECRET SCANNING
   gitleaks:
-    name: Secret Scan (Gitleaks)
-    runs-on: ubuntu-latest
+    uses: ./.github/workflows/reusable-secret-scan.yml
+    secrets: inherit
 
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-
-  # SAST AND DEPENDENCY SECURITY
   sast:
-    name: SAST (Bandit)
-    runs-on: ubuntu-latest
     needs: gitleaks
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Install Bandit
-        run: |
-          pip install bandit
-
-      - name: Run Bandit
-        run: |
-          bandit -r backend -f json -o bandit-report.json --severity-level medium --confidence-level medium
-
-      - name: Upload Bandit Report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: bandit-report-staging
-          path: bandit-report.json
-          retention-days: 14
+    uses: ./.github/workflows/reusable-sast.yml
+    with:
+      artifact-suffix: staging
+      fail-on-findings: true
+      retention-days: 14
 
   dependency-scan:
-    name: Dependency Vulnerability Scan
-    runs-on: ubuntu-latest
     needs: gitleaks
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: pip audit
-        run: |
-          pip install pip-audit
-          pip-audit -r backend/requirements.txt --format json --output pip-audit.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: npm audit
-        working-directory: frontend
-        run: |
-          npm install
-          npm audit --audit-level high --json > npm-audit.json
-
-      - name: Upload dependency reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: dependency-report-staging
-          path: |
-            pip-audit.json
-            frontend/npm-audit.json
-          retention-days: 14
+    uses: ./.github/workflows/reusable-dependency-scan.yml
+    with:
+      artifact-suffix: staging
+      fail-on-findings: true
+      retention-days: 14
 
   trivy-fs:
-    name: Trivy filesystem Scan
-    runs-on: ubuntu-latest
     needs: gitleaks
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          output: trivy-fs-results.txt
-
-      - name: Upload Trivy FS report
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: trivy-fs-report-staging
-          path: trivy-fs-results.txt
-          retention-days: 14
+    uses: ./.github/workflows/reusable-trivy-fs.yml
+    with:
+      artifact-suffix: staging
+      exit-code: 1
+      retention-days: 14
 
   hadolint:
-    name: Dockerfile Lint (Hadolint)
-    runs-on: ubuntu-latest
     needs: gitleaks
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Run Hadolint on Backend Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: backend/Dockerfile
-          output-file: hadolint-backend.txt
-          no-fail: true
-
-      - name: Run Hadolint on Frontend Dockerfile
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: frontend/Dockerfile
-          output-file: hadolint-frontend.txt
-          no-fail: true
-
-      - name: Upload Hadolint Reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: hadolint-report-staging
-          path: |
-            hadolint-backend.txt
-            hadolint-frontend.txt
-          retention-days: 14
+    uses: ./.github/workflows/reusable-hadolint.yml
+    with:
+      artifact-suffix: staging
+      retention-days: 14
 
   build:
-    name: Build Docker Images and push to Docker Hub
-    runs-on: ubuntu-latest
-    environment: staging
-    needs:
-      - sast
-      - dependency-scan
-      - trivy-fs
-      - hadolint
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      backend_digest: ${{ steps.build-backend.outputs.digest }}
-      frontend_digest: ${{ steps.build-frontend.outputs.digest }}
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Generate Image Tag
-        id: version
-        run: |
-          SHORT_SHA=${GITHUB_SHA::7}
-          echo "tag=staging-${SHORT_SHA}" >> $GITHUB_OUTPUT
-
-      - name: Docker Login
-        uses: docker/login-action@v4
-        with:
-          username: ${{secrets.DOCKERHUB_USERNAME}}
-          password: ${{secrets.DOCKERHUB_TOKEN}}
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build and push Backend Image
-        id: build-backend
-        uses: docker/build-push-action@v7
-        with:
-          context: ./backend
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:latest-staging
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and Push Frontend Image
-        id: build-frontend
-        uses: docker/build-push-action@v7
-        with:
-          context: ./frontend
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-staging
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+    needs: [sast, dependency-scan, trivy-fs, hadolint]
+    uses: ./.github/workflows/reusable-build.yml
+    with:
+      environment: staging
+      tag-prefix: staging
+    secrets: inherit
 
   trivy-image:
-    name: Trivy Image Scan
-    runs-on: ubuntu-latest
-    environment: staging
     needs: build
-    steps:
-      - name: Scan Backend Image
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          output: trivy-backend-image.txt
-
-      - name: Scan Frontend Image
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          output: trivy-frontend-image.txt
-
-      - name: Upload Trivy Image Reports
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: trivy-image-report-staging
-          path: |
-            trivy-backend-image.txt
-            trivy-frontend-image.txt
-          retention-days: 14
+    uses: ./.github/workflows/reusable-trivy-image.yml
+    with:
+      environment: staging
+      artifact-suffix: staging
+      image-tag: ${{ needs.build.outputs.tag }}
+      exit-code: 1
+      retention-days: 14
+    secrets: inherit
 
   sbom-and-sign:
-    name: Generate SBOM and Sign Images
-    runs-on: ubuntu-latest
-    environment: staging
-    permissions:
-      contents: read
-      id-token: write
-    needs:
-      - build
-      - trivy-image
-    steps:
-      - name: Generate Backend SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ needs.build.outputs.tag }}
-          format: cyclonedx
-          output: sbom-backend.cdx.json
-
-      - name: Generate Frontend SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ needs.build.outputs.tag }}
-          format: cyclonedx
-          output: sbom-frontend.cdx.json
-
-      - name: Upload SBOMs
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-staging
-          path: |
-            sbom-backend.cdx.json
-            sbom-frontend.cdx.json
-          retention-days: 30
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Docker Login
-        uses: docker/login-action@v4
-        with:
-          username: ${{secrets.DOCKERHUB_USERNAME}}
-          password: ${{secrets.DOCKERHUB_TOKEN}}
-
-      - name: Sign Backend Image (keyless, GitHub OIDC)
-        run: |
-          cosign sign --yes \
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}@${{ needs.build.outputs.backend_digest }}
-
-      - name: Sign Frontend Image (keyless, GitHub OIDC)
-        run: |
-          cosign sign --yes \
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}@${{ needs.build.outputs.frontend_digest }}
+    needs: [build, trivy-image]
+    uses: ./.github/workflows/reusable-sbom-sign.yml
+    with:
+      environment: staging
+      artifact-suffix: staging
+      image-tag: ${{ needs.build.outputs.tag }}
+      backend-digest: ${{ needs.build.outputs.backend_digest }}
+      frontend-digest: ${{ needs.build.outputs.frontend_digest }}
+      retention-days: 30
+    secrets: inherit
 
   # MANUAL APPROVAL GATE
   approval:
@@ -314,38 +88,13 @@ jobs:
         run: echo "Approved for staging deployment."
 
   deploy:
-    name: Deployment to the Staging Server
-    runs-on: ubuntu-latest
     needs: approval
-    environment: staging
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Copy compose files to EC2
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.STAGING_EC2_HOST }}
-          username: ${{ secrets.STAGING_EC2_USER }}
-          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
-          source: "compose.stag.yml,nginx/,scripts/"
-          target: "~/shophive"
-
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.STAGING_EC2_HOST }}
-          username: ${{ secrets.STAGING_EC2_USER }}
-          key: ${{ secrets.STAGING_EC2_SSH_KEY }}
-          envs: STAGING_ENV_FILE
-          script: |
-            set -e
-            cd ~/shophive
-
-            echo "$STAGING_ENV_FILE" > .env
-
-            docker compose -f compose.stag.yml pull
-            docker compose -f compose.stag.yml up -d --remove-orphans
-            docker image prune -f
-        env:
-          STAGING_ENV_FILE: ${{ secrets.STAGING_ENV_FILE }}
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: staging
+      compose-file: compose.stag.yml
+    secrets:
+      ec2-host: ${{ secrets.STAGING_EC2_HOST }}
+      ec2-user: ${{ secrets.STAGING_EC2_USER }}
+      ec2-ssh-key: ${{ secrets.STAGING_EC2_SSH_KEY }}
+      env-file: ${{ secrets.STAGING_ENV_FILE }}

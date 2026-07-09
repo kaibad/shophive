@@ -1,0 +1,45 @@
+name: Reusable - SAST (Bandit)
+
+on:
+  workflow_call:
+    inputs:
+      artifact-suffix:
+        required: true
+        type: string
+      fail-on-findings:
+        required: false
+        type: boolean
+        default: false
+      retention-days:
+        required: false
+        type: number
+        default: 7
+
+jobs:
+  sast:
+    name: SAST (Bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit
+        continue-on-error: ${{ !inputs.fail-on-findings }}
+        run: |
+          bandit -r backend -f json -o bandit-report.json --severity-level medium --confidence-level medium
+
+      - name: Upload Bandit Report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bandit-report-${{ inputs.artifact-suffix }}
+          path: bandit-report.json
+          retention-days: ${{ inputs.retention-days }}

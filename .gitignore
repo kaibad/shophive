@@ -35,3 +35,4 @@ Thumbs.db
 # Docker
 *.env.locail
 *.tmp
+rough/
