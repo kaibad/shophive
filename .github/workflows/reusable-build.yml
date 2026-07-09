@@ -9,6 +9,10 @@ on:
       tag-prefix:
         required: true
         type: string
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
     outputs:
       tag:
         value: ${{ jobs.build.outputs.tag }}
@@ -20,7 +24,7 @@ on:
 jobs:
   build:
     name: Build Docker Images and push to Docker Hub
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     outputs:
       tag: ${{ steps.version.outputs.tag }}

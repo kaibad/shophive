@@ -22,11 +22,15 @@ on:
         required: false
         type: number
         default: 30
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   sbom-and-sign:
     name: Generate SBOM and Sign Images
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     permissions:
       contents: read

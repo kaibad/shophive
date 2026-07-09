@@ -20,11 +20,15 @@ on:
         required: false
         type: number
         default: 7
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
 
 jobs:
   trivy-image:
     name: Trivy Image Scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     steps:
       - name: Scan Backend Image

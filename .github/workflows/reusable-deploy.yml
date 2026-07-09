@@ -9,6 +9,10 @@ on:
       compose-file:
         required: true
         type: string
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
     secrets:
       ec2-host:
         required: true
@@ -22,7 +26,7 @@ on:
 jobs:
   deploy:
     name: Deployment to ${{ inputs.environment }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout repo
