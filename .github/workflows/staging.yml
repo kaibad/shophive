@@ -13,39 +13,18 @@ jobs:
     uses: ./.github/workflows/reusable-secret-scan.yml
     secrets: inherit
 
-  sast:
+  scan-suite:
     needs: gitleaks
-    uses: ./.github/workflows/reusable-sast.yml
+    uses: ./.github/workflows/reusable-scan-suite.yml
     with:
       artifact-suffix: staging
       fail-on-findings: true
-      retention-days: 14
-
-  dependency-scan:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-dependency-scan.yml
-    with:
-      artifact-suffix: staging
-      fail-on-findings: true
-      retention-days: 14
-
-  trivy-fs:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-trivy-fs.yml
-    with:
-      artifact-suffix: staging
-      exit-code: 1
-      retention-days: 14
-
-  hadolint:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-hadolint.yml
-    with:
-      artifact-suffix: staging
+      trivy-fs-exit-code: 1
+      include-hadolint: true
       retention-days: 14
 
   build:
-    needs: [sast, dependency-scan, trivy-fs, hadolint]
+    needs: scan-suite
     uses: ./.github/workflows/reusable-build.yml
     with:
       environment: staging

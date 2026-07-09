@@ -9,32 +9,18 @@ jobs:
     uses: ./.github/workflows/reusable-secret-scan.yml
     secrets: inherit
 
-  sast:
+  scan-suite:
     needs: gitleaks
-    uses: ./.github/workflows/reusable-sast.yml
+    uses: ./.github/workflows/reusable-scan-suite.yml
     with:
       artifact-suffix: dev
       fail-on-findings: false
-      retention-days: 7
-
-  dependency-scan:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-dependency-scan.yml
-    with:
-      artifact-suffix: dev
-      fail-on-findings: false
-      retention-days: 7
-
-  trivy-fs:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-trivy-fs.yml
-    with:
-      artifact-suffix: dev
-      exit-code: 0
+      trivy-fs-exit-code: 0
+      include-hadolint: false
       retention-days: 7
 
   build:
-    needs: [sast, dependency-scan, trivy-fs]
+    needs: scan-suite
     uses: ./.github/workflows/reusable-build.yml
     with:
       environment: development
