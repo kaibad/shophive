@@ -36,3 +36,16 @@ Thumbs.db
 *.env.locail
 *.tmp
 rough/
+
+# Terraform
+*.tfstate
+*.tfstate.backup
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*.tfplan
+
