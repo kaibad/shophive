@@ -4,58 +4,193 @@ on:
   push:
     branches: [dev]
 
+concurrency:
+  group: dev-pipeline-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  gitleaks:
-    uses: ./.github/workflows/reusable-secret-scan.yml
-    secrets: inherit
-
-  scan-suite:
-    needs: gitleaks
-    uses: ./.github/workflows/reusable-scan-suite.yml
-    with:
-      artifact-suffix: dev
-      fail-on-findings: false
-      trivy-fs-exit-code: 0
-      include-hadolint: false
-      retention-days: 7
-
-  build:
-    needs: scan-suite
-    uses: ./.github/workflows/reusable-build.yml
-    with:
-      environment: development
-      tag-prefix: dev
-    secrets: inherit
-
-  trivy-image:
-    needs: build
-    uses: ./.github/workflows/reusable-trivy-image.yml
-    with:
-      environment: development
-      artifact-suffix: dev
-      image-tag: ${{ needs.build.outputs.tag }}
-      exit-code: 0
-      retention-days: 7
-    secrets: inherit
-
-  deploy:
-    needs: trivy-image
-    uses: ./.github/workflows/reusable-deploy.yml
-    with:
-      environment: development
-      compose-file: compose.dev.yml
-    secrets:
-      ec2-host: ${{ secrets.DEV_EC2_HOST }}
-      ec2-user: ${{ secrets.DEV_EC2_USER }}
-      ec2-ssh-key: ${{ secrets.DEV_EC2_SSH_KEY }}
-      env-file: ${{ secrets.DEV_ENV_FILE }}
-
-  health-check:
-    name: Health check
+  pipeline:
+    name: Scan, Build, Push, and Deploy (development)
     runs-on: ubuntu-latest
     environment: development
-    needs: deploy
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history, needed for gitleaks
+
+      # Always blocking, runs first so a leaked secret stops everything
+      # before any of the slower steps below run.
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      # Advisory only in dev, continue-on-error keeps the pipeline moving.
+      - name: Run Bandit
+        continue-on-error: true
+        run: |
+          bandit -r backend -f json -o bandit-report.json --severity-level medium --confidence-level medium
+
+      - name: pip audit
+        continue-on-error: true
+        run: |
+          pip install pip-audit
+          pip-audit -r backend/requirements.txt --format json --output pip-audit.json
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: npm audit
+        working-directory: frontend
+        continue-on-error: true
+        run: |
+          npm install
+          npm audit --audit-level high --json > npm-audit.json
+
+      - name: Run Trivy FS scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          output: trivy-fs-results.txt
+
+      - name: Upload Source Scan Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scan-reports-dev
+          path: |
+            bandit-report.json
+            pip-audit.json
+            frontend/npm-audit.json
+            trivy-fs-results.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Generate Image Tag
+        id: version
+        run: |
+          SHORT_SHA=${GITHUB_SHA::7}
+          echo "tag=dev-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Docker Login
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # push: false, load: true keeps the image on the runner only, nothing
+      # reaches Docker Hub until it's been scanned below.
+      - name: Build Backend Image (local only)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:latest-dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend Image (local only)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan Backend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          output: trivy-backend-image.txt
+
+      - name: Scan Frontend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 0
+          output: trivy-frontend-image.txt
+
+      - name: Upload Trivy Image Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-image-report-dev
+          path: |
+            trivy-backend-image.txt
+            trivy-frontend-image.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Reached regardless of scan findings in dev, since exit-code: 0 never
+      # fails the scan steps above.
+      - name: Push Backend Image
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:latest-dev
+
+      - name: Push Frontend Image
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ steps.version.outputs.tag }}
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:latest-dev
+
+      - name: Copy compose files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
+          source: "compose.dev.yml,nginx/,scripts/"
+          target: "~/shophive"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EC2_SSH_KEY }}
+          envs: DEPLOY_ENV_FILE
+          script: |
+            set -e
+            cd ~/shophive
+            echo "$DEPLOY_ENV_FILE" > .env
+            docker compose -f compose.dev.yml pull
+            docker compose -f compose.dev.yml up -d --remove-orphans
+            docker image prune -f
+        env:
+          DEPLOY_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
+
       - name: Check app health
         uses: appleboy/ssh-action@v1.2.0
         with:
