@@ -1,0 +1,62 @@
+name: Reusable - Trivy Image Scan
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      artifact-suffix:
+        required: true
+        type: string
+      image-tag:
+        required: true
+        type: string
+      exit-code:
+        required: false
+        type: number
+        default: 0
+      retention-days:
+        required: false
+        type: number
+        default: 7
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+
+jobs:
+  trivy-image:
+    name: Trivy Image Scan
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Scan Backend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.BACKEND_IMAGE }}:${{ inputs.image-tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: ${{ inputs.exit-code }}
+          output: trivy-backend-image.txt
+
+      - name: Scan Frontend Image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.DOCKERHUB_USERNAME }}/${{ vars.FRONTEND_IMAGE }}:${{ inputs.image-tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: ${{ inputs.exit-code }}
+          output: trivy-frontend-image.txt
+
+      - name: Upload Trivy Image Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: trivy-image-report-${{ inputs.artifact-suffix }}
+          path: |
+            trivy-backend-image.txt
+            trivy-frontend-image.txt
+          retention-days: ${{ inputs.retention-days }}

@@ -1,0 +1,61 @@
+name: Reusable - Deploy to EC2
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      compose-file:
+        required: true
+        type: string
+      runner:
+        required: false
+        type: string
+        default: ubuntu-latest
+    secrets:
+      ec2-host:
+        required: true
+      ec2-user:
+        required: true
+      ec2-ssh-key:
+        required: true
+      env-file:
+        required: true
+
+jobs:
+  deploy:
+    name: Deployment to ${{ inputs.environment }}
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Copy compose files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.ec2-host }}
+          username: ${{ secrets.ec2-user }}
+          key: ${{ secrets.ec2-ssh-key }}
+          source: "${{ inputs.compose-file }},nginx/,scripts/"
+          target: "~/shophive"
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.ec2-host }}
+          username: ${{ secrets.ec2-user }}
+          key: ${{ secrets.ec2-ssh-key }}
+          envs: DEPLOY_ENV_FILE
+          script: |
+            set -e
+            cd ~/shophive
+
+            echo "$DEPLOY_ENV_FILE" > .env
+
+            docker compose -f ${{ inputs.compose-file }} pull
+            docker compose -f ${{ inputs.compose-file }} up -d --remove-orphans
+            docker image prune -f
+        env:
+          DEPLOY_ENV_FILE: ${{ secrets.env-file }}
