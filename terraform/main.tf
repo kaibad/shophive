@@ -36,6 +36,7 @@ module "ecr" {
 
 module "ec2_dev" {
   source = "./modules/ec2"
+  count  = var.environment == "dev" ? 1 : 0
 
   project_name = var.project_name
   environment  = "dev"
@@ -50,6 +51,7 @@ module "ec2_dev" {
 
 module "ec2_staging" {
   source = "./modules/ec2"
+  count  = var.environment == "staging" ? 1 : 0
 
   project_name = var.project_name
   environment  = "staging"

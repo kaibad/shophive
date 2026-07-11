@@ -10,9 +10,9 @@ vpc_cidr     = "10.30.0.0/16"
 
 # EC2
 instance_type = "t3.medium"
-ami_id        = "ami-0123456789abcdef0"  # replace with a real prod AMI
+ami_id        = "ami-0f58b397bc5c1f2e8"  # replace with a real prod AMI
 key_name      = "mumbai"                  # replace with the production key pair name
 
 # Networking
-allowed_ip = "203.0.113.0/32"             # placeholder — restrict to admin IP/CIDR
+allowed_ip = "203.0.113.0/32"
 app_port   = 80
