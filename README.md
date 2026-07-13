@@ -82,6 +82,12 @@ Explains Helm charts, templates, values files, and Kubernetes application packag
 
 Explains Infrastructure as Code setup, cloud resource provisioning, Terraform workflow, and infrastructure management.
 
+**Note:** I did not use Terraform in this project. I initially planned to use it and made an effort to implement it, but I ran into some complications and wasn't able to complete that part. For this project, I provisioned the infrastructure manually instead.
+
+Going forward, I plan to learn the missing concepts around using Terraform across multiple environments and incorporate it into future projects.
+
+Thank you.
+
 ---
 
 ## Troubleshooting
