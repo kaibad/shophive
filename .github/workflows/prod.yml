@@ -1,0 +1,84 @@
+name: Production pipeline
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: prod-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # OIDC role assumption into AWS, and cosign keyless signing
+
+jobs:
+  secret-scan:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-backend:
+    name: Scan, Build, Push, Sign (backend)
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install Bandit and pip-audit
+        run: pip install bandit pip-audit
+
+      - name: Run Bandit
+        run: bandit -r backend --severity-level medium --confidence-level medium
+
+      - name: pip audit
+        run: pip-audit -r backend/requirements.txt
+
+      - name: Run Trivy FS scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: backend
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-fs-backend.txt
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: backend/Dockerfile
+          output-file: hadolint-backend.txt
+
+      - name: Upload Source Scan Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scan-reports-prod-backend
+          path: |
+            trivy-fs-backend.txt
+            hadolint-backend.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Generate Image Tag
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
