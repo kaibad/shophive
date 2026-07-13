@@ -313,3 +313,9 @@ Each shared environment, meaning dev and staging together, provisions one VPC in
 The network layout follows the same shape across environments: a VPC in the 10.10.0.0/16, 10.20.0.0/16, or 10.30.0.0/16 range depending on environment, containing an internet gateway and a public subnet in the 10.x.1.0/24 range. The relevant EC2 instance for that environment sits in the public subnet, and the shared security group permits SSH on port 22 from `allowed_ip`, HTTP on port 80 and HTTPS on port 443 from `0.0.0.0/0`, and all egress traffic outbound.
 
 When EC2 instances launch, they run `scripts/dev/dev-install.sh` via user data, which updates system packages, installs Docker and Docker Compose, pulls and starts the application containers, and configures the required environment variables.
+
+**Note:** I did not use Terraform in this project. I initially planned to use it and made an effort to implement it, but I ran into some complications and wasn't able to complete that part. For this project, I provisioned the infrastructure manually instead.
+
+Going forward, I plan to learn the missing concepts around using Terraform across multiple environments and incorporate it into future projects.
+
+Thank you.

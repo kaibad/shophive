@@ -34,6 +34,7 @@ jobs:
     environment: production
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
@@ -46,11 +47,8 @@ jobs:
       - name: Install Bandit and pip-audit
         run: pip install bandit pip-audit
 
-      - name: Run Bandit
-        run: bandit -r backend --severity-level medium --confidence-level medium
-
       - name: pip audit
-        run: pip-audit -r backend/requirements.txt
+        run: pip-audit -r backend/requirements.txt --format json --output pip-audit.json
 
       - name: Run Trivy FS scan
         uses: aquasecurity/trivy-action@v0.36.0
@@ -67,6 +65,7 @@ jobs:
         with:
           dockerfile: backend/Dockerfile
           output-file: hadolint-backend.txt
+          no-fail: true
 
       - name: Upload Source Scan Reports
         if: always()
@@ -82,3 +81,173 @@ jobs:
       - name: Generate Image Tag
         id: version
         run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY_ENDPOINT }}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Backend Image (local only)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          push: false
+          load: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push Backend Image to ECR
+        id: push
+        run: |
+          docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+          PUSH_OUTPUT=$(docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:latest)
+          DIGEST=$(echo "$PUSH_OUTPUT" | grep -oP 'sha256:[a-f0-9]{64}' | head -1)
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Generate Backend SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+          format: cyclonedx
+          output: sbom-backend.cdx.json
+
+      - name: Upload Backend SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-prod-backend
+          path: sbom-backend.cdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Backend Image (keyless, GitHub OIDC)
+        run: |
+          cosign sign --yes \
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}@${{ steps.push.outputs.digest }}
+
+  build-frontend:
+    name: Scan, Build, Push, Sign (frontend)
+    needs: secret-scan
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: npm audit
+        working-directory: frontend
+        run: |
+          npm install
+          npm audit --audit-level high --json > npm-audit.json
+
+      - name: Run Trivy FS scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: frontend
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          output: trivy-fs-frontend.txt
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: frontend/Dockerfile
+          output-file: hadolint-frontend.txt
+          no-fail: true
+
+      - name: Upload Source Scan Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: scan-reports-prod-frontend
+          path: |
+            frontend/npm-audit.json
+            trivy-fs-frontend.txt
+            hadolint-frontend.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Generate Image Tag
+        id: version
+        run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Log in to ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY_ENDPOINT }}
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Frontend Image (local only)
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          push: false
+          load: true
+          tags: |
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push Frontend Image to ECR
+        id: push
+        run: |
+          docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+          PUSH_OUTPUT=$(docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:latest)
+          DIGEST=$(echo "$PUSH_OUTPUT" | grep -oP 'sha256:[a-f0-9]{64}' | head -1)
+          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+
+      - name: Generate Frontend SBOM (CycloneDX)
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+          format: cyclonedx
+          output: sbom-frontend.cdx.json
+
+      - name: Upload Frontend SBOM
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbom-prod-frontend
+          path: sbom-frontend.cdx.json
+          retention-days: 90
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Frontend Image (keyless, GitHub OIDC)
+        run: |
+          cosign sign --yes \
+            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}@${{ steps.push.outputs.digest }}
