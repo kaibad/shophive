@@ -44,8 +44,8 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Bandit and pip-audit
-        run: pip install bandit pip-audit
+      - name: Install pip-audit
+        run: pip install pip-audit
 
       - name: pip audit
         run: pip-audit -r backend/requirements.txt --format json --output pip-audit.json
@@ -85,8 +85,7 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Log in to ECR
@@ -198,13 +197,12 @@ jobs:
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v6.1.0
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Log in to ECR
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY_ENDPOINT }}
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Setup Buildx
         uses: docker/setup-buildx-action@v4
@@ -216,8 +214,8 @@ jobs:
           push: false
           load: true
           tags: |
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:latest
+            ${{ steps.ecr-login.outputs.registry }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ vars.BACKEND_ECR_REPO }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
