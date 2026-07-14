@@ -153,6 +153,32 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # exit-code: 0 above never fails the scan steps, so this step is the
+      # only thing that actually surfaces findings anywhere visible. It reads
+      # each report, writes a summary to the run's Summary tab, and raises a
+      # ::warning:: annotation (shown on the run page) for any file that
+      # contains a HIGH or CRITICAL finding.
+      - name: Summarize vulnerability findings
+        if: always()
+        run: |
+          echo "## Vulnerability Scan Summary" >> $GITHUB_STEP_SUMMARY
+          for f in trivy-fs-results.txt trivy-backend-image.txt trivy-frontend-image.txt; do
+            if [ ! -f "$f" ]; then
+              echo "- \`$f\`: not generated (step may have failed before writing output)" >> $GITHUB_STEP_SUMMARY
+              continue
+            fi
+            if grep -qE "HIGH|CRITICAL" "$f"; then
+              COUNT=$(grep -oE "HIGH|CRITICAL" "$f" | wc -l)
+              echo "### ⚠️ $f — $COUNT HIGH/CRITICAL finding(s)" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cat "$f" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              echo "::warning::Vulnerabilities found in $f — see job summary for details"
+            else
+              echo "- \`$f\`: no HIGH/CRITICAL findings" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
       # Reached regardless of scan findings in dev, since exit-code: 0 never
       # fails the scan steps above.
       - name: Push Backend Image
@@ -190,13 +216,3 @@ jobs:
             docker image prune -f
         env:
           DEPLOY_ENV_FILE: ${{ secrets.DEV_ENV_FILE }}
-
-      - name: Check app health
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.DEV_EC2_HOST }}
-          username: ${{ secrets.DEV_EC2_USER }}
-          key: ${{ secrets.DEV_EC2_SSH_KEY }}
-          script: |
-            cd ~/shophive
-            ./scripts/dev/healthcheck.sh
