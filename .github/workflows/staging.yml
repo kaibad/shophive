@@ -2,7 +2,7 @@ name: Staging pipeline
 
 on:
   push:
-    branches: [qa]
+    branches: [main]
 
 concurrency:
   group: staging-pipeline-${{ github.ref }}
@@ -19,6 +19,8 @@ jobs:
     environment: staging
     outputs:
       tag: ${{ steps.version.outputs.tag }}
+      backend-digest: ${{ steps.push-backend.outputs.digest }}
+      frontend-digest: ${{ steps.push-frontend.outputs.digest }}
     steps:
       - name: Checkout repo
         uses: actions/checkout@v7
