@@ -26,15 +26,9 @@ jobs:
                 exit 1
               fi
               ;;
-            qa)
-              if [ "$HEAD" != "dev" ]; then
-                echo "::error::Only dev can merge into qa."
-                exit 1
-              fi
-              ;;
             main)
-              if [ "$HEAD" != "qa" ]; then
-                echo "::error::Only qa can merge into main."
+              if [ "$HEAD" != "dev" ]; then
+                echo "::error::Only dev can merge into main."
                 exit 1
               fi
               ;;
