@@ -118,13 +118,7 @@ jobs:
     environment: production
     strategy:
       matrix:
-        include:
-          - component: backend
-            context: ./backend
-            ecr_repo: ${{ vars.BACKEND_ECR_REPO }}
-          - component: frontend
-            context: ./frontend
-            ecr_repo: ${{ vars.FRONTEND_ECR_REPO }}
+        component: [backend, frontend]
     outputs:
       backend_digest: ${{ steps.digest.outputs.backend_digest }}
       frontend_digest: ${{ steps.digest.outputs.frontend_digest }}
@@ -141,18 +135,29 @@ jobs:
         id: ecr-login
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set component context (repo path + build context)
+        id: component
+        run: |
+          if [ "${{ matrix.component }}" == "backend" ]; then
+            echo "ecr_repo=${{ vars.BACKEND_ECR_REPO }}" >> "$GITHUB_OUTPUT"
+            echo "context=./backend" >> "$GITHUB_OUTPUT"
+          else
+            echo "ecr_repo=${{ vars.FRONTEND_ECR_REPO }}" >> "$GITHUB_OUTPUT"
+            echo "context=./frontend" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set image tag
         id: vars
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
         run: |
-          docker build -t ${{ matrix.component }}:${{ steps.vars.outputs.tag }} ${{ matrix.context }}
+          docker build -t ${{ matrix.component }}:${{ steps.vars.outputs.tag }} ${{ steps.component.outputs.context }}
 
       - name: Tag image for ECR
         run: |
           docker tag ${{ matrix.component }}:${{ steps.vars.outputs.tag }} \
-            ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}:${{ steps.vars.outputs.tag }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
 
       - name: Trivy image scan (pre-push gate)
         uses: aquasecurity/trivy-action@master
@@ -165,13 +170,13 @@ jobs:
       - name: Push image to ECR
         id: push
         run: |
-          docker push ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}:${{ steps.vars.outputs.tag }}
+          docker push ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
 
       - name: Capture image digest
         id: digest
         run: |
           DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' \
-            ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}:${{ steps.vars.outputs.tag }} | cut -d'@' -f2)
+            ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}:${{ steps.vars.outputs.tag }} | cut -d'@' -f2)
           echo "${{ matrix.component }}_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - name: Install cosign
@@ -182,12 +187,12 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           cosign sign --yes \
-            ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}@${{ steps.digest.outputs[format('{0}_digest', matrix.component)] }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}@${{ steps.digest.outputs[format('{0}_digest', matrix.component)] }}
 
       - name: Generate SBOM (CycloneDX)
         uses: anchore/sbom-action@v0
         with:
-          image: ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}:${{ steps.vars.outputs.tag }}
+          image: ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}:${{ steps.vars.outputs.tag }}
           format: cyclonedx-json
           output-file: sbom-${{ matrix.component }}.cdx.json
 
@@ -198,7 +203,7 @@ jobs:
           cosign attest --yes \
             --predicate sbom-${{ matrix.component }}.cdx.json \
             --type cyclonedx \
-            ${{ steps.ecr-login.outputs.registry }}/${{ matrix.ecr_repo }}@${{ steps.digest.outputs[format('{0}_digest', matrix.component)] }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ steps.component.outputs.ecr_repo }}@${{ steps.digest.outputs[format('{0}_digest', matrix.component)] }}
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
