@@ -1,0 +1,46 @@
+name: Validate AWS OIDC
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Debug OIDC token claims
+        run: |
+          curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" \
+            | jq -r '.value' | cut -d '.' -f2 | base64 -d 2>/dev/null | jq .
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6.0.0
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ap-south-1
+          role-session-name: gh-oidc-validate-${{ github.run_id }}
+
+      - name: STS GetCallerIdentity
+        id: sts
+        run: |
+          aws sts get-caller-identity --output json | tee caller.json
+          echo "account=$(jq -r .Account caller.json)" >> "$GITHUB_OUTPUT"
+          echo "arn=$(jq -r .Arn caller.json)" >> "$GITHUB_OUTPUT"
+          echo "userid=$(jq -r .UserId caller.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Summary
+        run: |
+          {
+            echo "### AWS OIDC validation"
+            echo ""
+            echo "**Account:** \`${{ steps.sts.outputs.account }}\`"
+            echo "**ARN:** \`${{ steps.sts.outputs.arn }}\`"
+            echo "**UserId:** \`${{ steps.sts.outputs.userid }}\`"
+            echo ""
+            echo "If this job is green, GitHub Actions successfully assumed the IAM role via OIDC."
+          } >> "$GITHUB_STEP_SUMMARY"
