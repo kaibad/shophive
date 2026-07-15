@@ -49,3 +49,5 @@ override.tf.json
 *_override.tf
 *.tfplan
 
+interview*
+

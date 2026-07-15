@@ -1,595 +1,385 @@
-## Production Pipeline
+# ShopHive Production Pipeline
 
-Coming soon.
+## Overview
 
-Will follow a different deployment path from dev and staging:
+The production pipeline builds, scans, signs, and pushes container images to AWS ECR whenever a Git tag matching `v*.*.*` is pushed. It follows a different path from the dev and staging pipelines by design: production images are pushed to a private registry (ECR, not Docker Hub), authentication uses short-lived federated credentials instead of static keys, and the actual deployment step is deliberately manual rather than automated.
 
-- Triggers on Git tags matching `v*.*.*`
-- Images pushed to AWS ECR instead of Docker Hub
-- Deployment via AWS CodeDeploy with a manual approval gate before any traffic shifts
-- Uses `appspec.yml` and `scripts/deploy.sh` for CodeDeploy lifecycle hooks
-- IAM policy scoped to CI user with least-privilege permissions
-- All Trivy, Bandit, and dependency scans hard-block on any HIGH or CRITICAL finding
+**Trigger:** `push: tags: ["v*.*.*"]`, with an optional `workflow_dispatch` fallback that requires an explicit `confirm: deploy` input to prevent accidental manual runs.
 
-steps ==============
+---
 
-Production Pipeline: Removed Steps
-Bandit (backend job)
-Removed. Bandit is a SAST tool — its findings depend only on source code, not on environment or time. Production tags are cut from code already merged and scanned through the staging (qa) pipeline, so re-running Bandit against the same source in production adds no new signal. It remains in the staging pipeline, where it catches issues on new code.
-Local Trivy image scan (backend + frontend jobs)
-Removed. ECR repositories have scan-on-push enabled at the infrastructure level (Terraform), so every image pushed by this pipeline is scanned server-side regardless of whether CI scans it first. Running Trivy against the image locally in CI duplicated that work and added scan time to every run.
-Tradeoff: previously, a failed local scan blocked the push. That gate is now removed — the pipeline pushes unconditionally, and the check moves downstream. Before promoting an image via Helm deploy, check ECR scan findings for that tag.
-Kept unchanged
-Gitleaks, pip-audit, npm audit, and Trivy filesystem scans remain in the production pipeline. Unlike Bandit, these check against vulnerability databases that update daily — a dependency clean in staging can have a new CVE disclosed by the time a tag is cut days later. They're cheap to run (seconds to low minutes), so re-running them at each stage is worth it independent of whether the source changed.
+## Pipeline Stages
 
-```
-Let's say you push tag v0.1.0. Note: your trigger is tags: ["v*.*.*"], which requires three dot-separated segments .
-What happens, step by step:
+| Stage            | Purpose                                                                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `guard`          | Validates the trigger — blocks manual runs unless `confirm` is explicitly set to `deploy`.                                                             |
+| `secrets-scan`   | Gitleaks scan across full repo history for leaked credentials.                                                                                         |
+| `code-scan`      | Dependency and filesystem vulnerability scans (`pip-audit`, `npm audit`, Trivy FS) for backend and frontend, matrixed.                                 |
+| `build-and-push` | Builds each image, tags it for ECR, scans it with Trivy, pushes it, captures its digest, signs it with cosign, generates and attests a CycloneDX SBOM. |
 
-git tag v0.1.0 && git push origin v0.1.0
-The workflow fires. GITHUB_REF_NAME is set to v0.1.0.
-In build-backend, the Generate Image Tag step (id: version) runs:
+### Why some staging-pipeline steps were intentionally dropped in production
 
-   tag=v0.1.0
-written to $GITHUB_OUTPUT, so steps.version.outputs.tag = v0.1.0.
-4. The image builds and gets tagged as <ECR_REPO_URL>/<BACKEND_ECR_REPO>:v0.1.0.
-5. The Push Backend Image to ECR step (id: push) pushes it, parses the digest out of the push output, e.g.:
-   digest=sha256:a1b2c3d4e5f6...
-so steps.push.outputs.digest = sha256:a1b2c3d4e5f6....
-6. At the job level, the outputs block republishes both:
-yaml   outputs:
-     tag: v0.1.0
-     digest: sha256:a1b2c3d4e5f6...
+**Bandit (backend SAST)** — removed from the production pipeline. Bandit's findings depend only on source code, not on environment or time. Production tags are cut from code that has already merged and been scanned through the staging pipeline, so re-running Bandit against identical source adds no new signal. It remains in staging, where it catches issues on new code as it lands.
 
-Anything with needs: build-backend can now reference these as needs.build-backend.outputs.tag and needs.build-backend.outputs.digest.
+**Local Trivy image scan** — removed as a hard pre-push gate. ECR repositories have scan-on-push enabled at the infrastructure level, so every image pushed by this pipeline is scanned server-side regardless of whether CI scans it first. Running Trivy locally in CI duplicated that work and added scan time to every run.
 
-Concretely, in a downstream job:
-yamlnotify-deploy-ready:
-  needs: [build-backend, build-frontend]
-  runs-on: ubuntu-latest
-  steps:
-    - name: Print what was built
-      run: |
-        echo "Backend image: ${{ needs.build-backend.outputs.tag }}"
-        echo "Backend digest: ${{ needs.build-backend.outputs.digest }}"
-would print:
-Backend image: v0.1.0
-Backend digest: sha256:a1b2c3d4e5f6...
-That digest is the piece that matters most for your manual Helm deploy — the tag v0.1.0 could theoretically get re-pushed to point at a different image later, but the digest is immutable and always identifies the exact image that was built, scanned, and signed in this specific run.
-```
+> **Tradeoff:** previously, a failed local scan blocked the push. That gate has moved downstream — the pipeline now pushes unconditionally, and ECR's scan-on-push results should be checked for a given tag before promoting it to any environment.
 
-================ecr
+**Kept unchanged:** Gitleaks, pip-audit, npm audit, and Trivy filesystem scans remain in the production pipeline. Unlike Bandit, these check against vulnerability databases that update daily — a dependency that was clean in staging can have a new CVE disclosed by the time a tag is cut days later. They're cheap to run (seconds to low minutes), so re-running them at each stage is worth it independent of whether the source itself changed.
 
-namespace/repo-name
+---
 
-1. create a ecr repo like shophive-prod/backend and shophive-prod/froentend
+## Authentication: Moving from Static Keys to OIDC
 
-view push commands
+### The problem
 
-1. initial prod.yml
-
-```yaml
-name: Production pipeline
-
-on:
-  push:
-    tags: ["v*.*.*"]
-
-concurrency:
-  group: prod-pipeline-${{ github.ref }}
-  cancel-in-progress: false
-
-permissions:
-  contents: read
-  id-token: write # OIDC role assumption into AWS, and cosign keyless signing
-
-jobs:
-  secret-scan:
-    name: Gitleaks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Run Gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  build-backend:
-    name: Scan, Build, Push, Sign (backend)
-    needs: secret-scan
-    runs-on: ubuntu-latest
-    environment: production
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      digest: ${{ steps.push.outputs.digest }}
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Setup Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
-
-      - name: Install Bandit and pip-audit
-        run: pip install bandit pip-audit
-
-      - name: pip audit
-        run: pip-audit -r backend/requirements.txt --format json --output pip-audit.json
-
-      - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: backend
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          output: trivy-fs-backend.txt
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: backend/Dockerfile
-          output-file: hadolint-backend.txt
-          no-fail: true
-
-      - name: Upload Source Scan Reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: scan-reports-prod-backend
-          path: |
-            trivy-fs-backend.txt
-            hadolint-backend.txt
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Generate Image Tag
-        id: version
-        run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v6.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Log in to ECR
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY_ENDPOINT }}
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build Backend Image (local only)
-        uses: docker/build-push-action@v7
-        with:
-          context: ./backend
-          push: false
-          load: true
-          tags: |
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Push Backend Image to ECR
-        id: push
-        run: |
-          docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-          PUSH_OUTPUT=$(docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:latest)
-          DIGEST=$(echo "$PUSH_OUTPUT" | grep -oP 'sha256:[a-f0-9]{64}' | head -1)
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
-
-      - name: Generate Backend SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-          format: cyclonedx
-          output: sbom-backend.cdx.json
-
-      - name: Upload Backend SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-prod-backend
-          path: sbom-backend.cdx.json
-          retention-days: 90
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign Backend Image (keyless, GitHub OIDC)
-        run: |
-          cosign sign --yes \
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.BACKEND_ECR_REPO }}@${{ steps.push.outputs.digest }}
-
-  build-frontend:
-    name: Scan, Build, Push, Sign (frontend)
-    needs: secret-scan
-    runs-on: ubuntu-latest
-    environment: production
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      digest: ${{ steps.push.outputs.digest }}
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-
-      - name: npm audit
-        working-directory: frontend
-        run: |
-          npm install
-          npm audit --audit-level high --json > npm-audit.json
-
-      - name: Run Trivy FS scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: frontend
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: 1
-          output: trivy-fs-frontend.txt
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: frontend/Dockerfile
-          output-file: hadolint-frontend.txt
-          no-fail: true
-
-      - name: Upload Source Scan Reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: scan-reports-prod-frontend
-          path: |
-            frontend/npm-audit.json
-            trivy-fs-frontend.txt
-            hadolint-frontend.txt
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Generate Image Tag
-        id: version
-        run: echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v6.1.0
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Log in to ECR
-        run: |
-          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.ECR_REGISTRY_ENDPOINT }}
-
-      - name: Setup Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Build Frontend Image (local only)
-        uses: docker/build-push-action@v7
-        with:
-          context: ./frontend
-          push: false
-          load: true
-          tags: |
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Push Frontend Image to ECR
-        id: push
-        run: |
-          docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-          PUSH_OUTPUT=$(docker push ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:latest)
-          DIGEST=$(echo "$PUSH_OUTPUT" | grep -oP 'sha256:[a-f0-9]{64}' | head -1)
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
-
-      - name: Generate Frontend SBOM (CycloneDX)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: image
-          image-ref: ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}:${{ steps.version.outputs.tag }}
-          format: cyclonedx
-          output: sbom-frontend.cdx.json
-
-      - name: Upload Frontend SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-prod-frontend
-          path: sbom-frontend.cdx.json
-          retention-days: 90
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
-
-      - name: Sign Frontend Image (keyless, GitHub OIDC)
-        run: |
-          cosign sign --yes \
-            ${{ secrets.ECR_REGISTRY_ENDPOINT }}/${{ vars.FRONTEND_ECR_REPO }}@${{ steps.push.outputs.digest }}
-```
-
-The problem
-Both jobs authenticate to AWS using long-lived static credentials:
+The pipeline originally authenticated to AWS using long-lived static credentials:
 
 ```yaml
 - name: Configure AWS Credentials
   uses: aws-actions/configure-aws-credentials@v6.1.0
   with:
-    aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
+    aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
     aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     aws-region: ${{ secrets.AWS_REGION }}
-This has real downsides for a production pipeline specifically:
 ```
 
-No expiration. A static access key/secret pair is valid until someone manually rotates or revokes it — could be indefinitely if a leak goes unnoticed.
-Not scoped to this workflow. The key works from anywhere it's copied to — a local laptop, a different repo, a different branch. There's nothing tying it to "only GitHub Actions, only this repo, only tag pushes."
-Sits in secrets at rest, always. Even if never leaked, it's a permanent credential sitting in GitHub's secret store rather than something minted fresh per run and discarded after.
-There's also a live typo bug independent of the OIDC question: secrets.AWS_ACCCESS_KEY_ID (triple C) won't match a real secret name, so this step is currently failing auth regardless.
+This carries real downsides for a production pipeline specifically:
 
-Your permissions: block already declares id-token: write, and the comment even says "OIDC role assumption into AWS" — the intent was there, it just wasn't wired up in the actual steps.
-What OIDC changes
-Instead of a stored key, GitHub mints a short-lived, cryptographically signed identity token for the specific job run (tied to repo, branch/tag ref, and workflow). AWS's IAM trusts GitHub's OIDC provider and assumes a role in exchange for that token — no secret ever stored, and the resulting session credentials expire automatically (typically within an hour). The IAM role's trust policy can restrict exactly which repo/ref is allowed to assume it (e.g. only repo:404bad/shophive:ref:refs/tags/v\*), so even if a workflow run is compromised, the blast radius is scoped by AWS, not by convention.
-What needs to change in the YAML:
+- **No expiration.** A static access key/secret pair is valid until someone manually rotates or revokes it — potentially indefinitely if a leak goes unnoticed.
+- **Not scoped to the workflow.** The key works from anywhere it's copied to — a laptop, a different repo, a different branch. Nothing ties it to "only GitHub Actions, only this repo, only tag pushes."
+- **Sits in secrets at rest, permanently.** Even if never leaked, it's a standing credential in GitHub's secret store rather than something minted fresh per run and discarded afterward.
 
-configure-aws-credentials switches from aws-access-key-id/aws-secret-access-key to role-to-assume (an IAM role ARN)
-Manual docker login via aws ecr get-login-password is replaced by aws-actions/amazon-ecr-login, which handles the ECR auth token exchange using the already-assumed role
-References to secrets.ECR_REGISTRY_ENDPOINT become steps.ecr-login.outputs.registry, since the login action returns the registry URI rather than you having to store it as a secret
-AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets can be deleted from the repo entirely once this is confirmed working
+### The fix: GitHub OIDC federation
 
-write this part in a separate script echo "## Vulnerability Scan Summary" >> $GITHUB_STEP_SUMMARY
+Instead of a stored key, GitHub mints a short-lived, cryptographically signed identity token for the specific job run, tied to the repository, ref, and workflow. AWS IAM trusts GitHub's OIDC provider and exchanges that token for temporary session credentials, which expire automatically (typically within an hour). The IAM role's trust policy restricts exactly which repository and context is allowed to assume it — so even if a workflow run were compromised, the blast radius is bounded by AWS, not by convention.
 
-          echo "### Trivy scans" >> $GITHUB_STEP_SUMMARY
-          for f in trivy-fs-results.txt trivy-backend-image.txt trivy-frontend-image.txt; do
-            if [ ! -f "$f" ]; then
-              echo "- \$f\: not generated (step may have failed before writing output)" >> $GITHUB_STEP_SUMMARY
-              continue
-            fi
-            if grep -qE "HIGH|CRITICAL" "$f"; then
-              COUNT=$(grep -oE "HIGH|CRITICAL" "$f" | wc -l)
-              echo "- ⚠️ \$f\: $COUNT HIGH/CRITICAL finding(s)" >> $GITHUB_STEP_SUMMARY
-              echo '<details><summary>Full report</summary>' >> $GITHUB_STEP_SUMMARY
-              echo '' >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              cat "$f" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              echo '</details>' >> $GITHUB_STEP_SUMMARY
-              echo "::warning::Vulnerabilities found in $f — see job summary for details"
-            else
-              echo "- \$f\: no HIGH/CRITICAL findings" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+**Changes made to the workflow:**
 
-          echo "### Bandit (SAST)" >> $GITHUB_STEP_SUMMARY
-          if [ -f bandit-report.json ]; then
-            COUNT=$(jq '.results | length' bandit-report.json)
-            if [ "$COUNT" -gt 0 ]; then
-              echo "- ⚠️ \bandit-report.json\: $COUNT finding(s)" >> $GITHUB_STEP_SUMMARY
-              echo "::warning::Bandit found $COUNT issue(s) — see scan-reports-dev artifact"
-            else
-              echo "- \bandit-report.json\: no findings" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "- \bandit-report.json\: not generated" >> $GITHUB_STEP_SUMMARY
-          fi
+- `configure-aws-credentials` now uses `role-to-assume` (an IAM role ARN) instead of static access keys.
+- Manual `docker login` via `aws ecr get-login-password` is replaced by `aws-actions/amazon-ecr-login`, which performs the ECR auth token exchange using the already-assumed role.
+- The registry endpoint is read from `steps.ecr-login.outputs.registry` rather than stored as a secret.
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` secrets are no longer used and can be deleted once the OIDC path is confirmed working.
 
-          echo "### pip-audit" >> $GITHUB_STEP_SUMMARY
-          if [ -f pip-audit.json ]; then
-            COUNT=$(jq '[.dependencies[]?.vulns[]?] | length' pip-audit.json)
-            if [ "$COUNT" -gt 0 ]; then
-              echo "- ⚠️ \pip-audit.json\: $COUNT vulnerable dependency finding(s)" >> $GITHUB_STEP_SUMMARY
-              echo "::warning::pip-audit found $COUNT vulnerability finding(s) — see scan-reports-dev artifact"
-            else
-              echo "- \pip-audit.json\: no findings" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "- \pip-audit.json\: not generated" >> $GITHUB_STEP_SUMMARY
-          fi
+### AWS setup (manual, console-based)
 
-          echo "### npm audit" >> $GITHUB_STEP_SUMMARY
-          if [ -f frontend/npm-audit.json ]; then
-            HIGH=$(jq '.metadata.vulnerabilities.high // 0' frontend/npm-audit.json)
-            CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' frontend/npm-audit.json)
-            TOTAL=$((HIGH + CRITICAL))
-            if [ "$TOTAL" -gt 0 ]; then
-              echo "- ⚠️ \npm-audit.json\: $HIGH high, $CRITICAL critical" >> $GITHUB_STEP_SUMMARY
-              echo "::warning::npm audit found $HIGH high / $CRITICAL critical finding(s) — see scan-reports-dev artifact"
-            else
-              echo "- \npm-audit.json\: no high/critical findings" >> $GITHUB_STEP_SUMMARY
-            fi
-          else
-            echo "- \npm-audit.json\: not generated" >> $GITHUB_STEP_SUMMARY
-          fi
+1. **Add GitHub's OIDC identity provider to IAM** (one-time per AWS account):
+   - IAM → Identity providers → Add provider
+   - Provider type: OpenID Connect
+   - Provider URL: `https://token.actions.githubusercontent.com`
+   - Audience: `sts.amazonaws.com`
 
-Show more
+2. **Create the IAM role**:
+   - IAM → Roles → Create role → Trusted entity type: Web identity
+   - Identity provider: the one created above
+   - GitHub organization / repository: filled in; **branch field left blank** (see note below)
 
-Architected modular bash script for vulnerability summary reporting
-Architected modular bash script for vulnerability summary reporting
-Now update the workflow step to call it instead of the inline block:
+3. **Set the trust policy by hand:**
 
-Edited a file, viewed a file
-Edited a file, viewed a file
-Good — it looks like this already went through in the file. The workflow step now just calls the script:
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "sts:AssumeRoleWithWebIdentity",
+         "Principal": {
+           "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+         },
+         "Condition": {
+           "StringEquals": {
+             "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+             "token.actions.githubusercontent.com:sub": "repo:kaibad/shophive:environment:production"
+           }
+         }
+       }
+     ]
+   }
+   ```
 
-Viewed a file, read a file
-Viewed a file, read a file
-Two things to do when you commit this:
+   **Note on the branch field:** the console's guided branch/tag field generates a `ref:refs/heads/...` or `ref:refs/tags/...` style condition. Since `build-and-push` runs under `environment: production`, GitHub issues the token with the subject `repo:kaibad/shophive:environment:production` — not a ref-based subject. A console-generated `ref` condition will never match this token shape and will silently block role assumption, so the trust policy's `sub` condition is written by hand to match the environment-based claim instead.
 
-Put the script at scripts/summarize-scans.sh in your repo (same relative path your Copy compose files to EC2 step already uploads from scripts/, so it lives alongside your other deploy scripts).
-Make sure the executable bit survives the commit: git update-index --chmod=+x scripts/summarize-scans.sh after git add, or just chmod +x scripts/summarize-scans.sh before staging — git tracks the executable bit, and it's easy to lose if the file gets copied/re-created without it. The workflow step calls it as bash scripts/summarize-scans.sh rather than ./scripts/summarize-scans.sh, so the executable bit isn't strictly required for the workflow to run, but it's good practice for consistency with your other scripts.
+4. **Attach a least-privilege ECR push policy:**
 
-Summarize scans
-SH
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Effect": "Allow",
+         "Action": "ecr:GetAuthorizationToken",
+         "Resource": "*"
+       },
+       {
+         "Effect": "Allow",
+         "Action": [
+           "ecr:BatchCheckLayerAvailability",
+           "ecr:GetDownloadUrlForLayer",
+           "ecr:BatchGetImage",
+           "ecr:PutImage",
+           "ecr:InitiateLayerUpload",
+           "ecr:UploadLayerPart",
+           "ecr:CompleteLayerUpload"
+         ],
+         "Resource": [
+           "arn:aws:ecr:ap-south-1:<ACCOUNT_ID>:repository/shophive-prod/backend",
+           "arn:aws:ecr:ap-south-1:<ACCOUNT_ID>:repository/shophive-prod/frontend"
+         ]
+       }
+     ]
+   }
+   ```
 
-Dev pipeline
-YML
-1784009942368_image.png
-this is my prod piepline instead fo hard coded credentials lets use oidc ... first write what is the probelm then what shoudl be done ans then write the yml file
+   `ecr:GetAuthorizationToken` must remain scoped to `Resource: "*"` — this is an ECR API constraint, not a scoping choice; the action doesn't support resource-level restriction. Everything else is scoped to the two production repositories.
 
-Thought for 3s
-Thought for 3s
-That image is your GitHub profile page, not the pipeline file — but I have the current production pipeline from our work above, so I'll go ahead and convert that one to OIDC.
+5. **Store the role ARN as a GitHub environment secret:**
+   - Settings → Environments → `production` → Environment secrets
+   - Name: `AWS_ECR_PUSH_ROLE_ARN`
+   - Value: the role's ARN (`arn:aws:iam::<ACCOUNT_ID>:role/shophive-prod-ecr-push`)
 
-View current production-pipeline.yml before converting to OIDC
-View current production-pipeline.yml before converting to OIDC
-The problem
-Right now both jobs authenticate to AWS with AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY — long-lived static credentials stored as GitHub secrets. That has a few concrete downsides:
+### Validating OIDC independently
 
-They don't expire on their own. If one leaks (accidental commit, log output, compromised runner), it's valid until someone manually rotates or revokes it — could be indefinitely if nobody notices.
-They're not scoped to this workflow. Any workflow, branch, or person with repo secret access can use the same key. There's no way to say "only this repo, only this workflow, only tag pushes" with a static key — the IAM policy attached to it is the only boundary.
-\*\*Rotation is manual to
-Claude’s response was interrupted.
+A standalone `workflow_dispatch`-only workflow (`validate-oidc.yml`) was added to test the trust policy, role, and secret chain in isolation — assuming the role and calling `sts get-caller-identity` — without running the full production pipeline. This significantly shortens the debug loop when troubleshooting trust policy issues, since failures surface in seconds rather than after several minutes of unrelated build/scan steps.
 
-## Production Pipeline Coming soon. Will follow a different deployment path from dev and staging: - Triggers on Git tags matching `v*.*.*` - Images pushed to AWS ECR instead of Docker Hub - Deployment via AWS CodeDeploy with a manual approval gate before any traffic shifts - Uses `appspec.yml` an
+---
 
-pasted
+## Branch Strategy Change: Removing the QA Branch
 
-haha sorry that was mistake this is the current prod.yml
+Maintaining a separate long-lived `qa` branch added unnecessary complexity — extra pull requests and merge commits with no corresponding value, since the branch existed purely to gate staging deploys.
 
-Prepared to analyze configuration file and propose security improvements
-Prepared to analyze configuration file and propose security improvements
-The problem
-Both jobs authenticate to AWS using long-lived static credentials:
+**Change:** the staging pipeline's trigger moved from `push: branches: [qa]` to `push: branches: [main]`. Merges into `main` now trigger staging automatically; once staging passes, a release tag (`vX.Y.Z`) is created manually to trigger production.
 
-yaml
+**Issue encountered:** after retargeting the trigger, the pipeline began failing with _"Branch 'main' is not allowed to deploy to staging due to environment protection rules."_ This was not a workflow YAML issue — GitHub Environments (`staging`, `staging-deploy-approval`) had branch-deployment policies still restricted to the old `qa` branch, configured separately under **Settings → Environments → [environment] → Deployment branches and tags**. GitHub enforces these rules before a job with `environment:` is permitted to run, independent of the workflow file itself.
 
-- name: Configure AWS Credentials
-  uses: aws-actions/configure-aws-credentials@v6.1.0
-  with:
-  aws-access-key-id: ${{ secrets.AWS_ACCCESS_KEY_ID }}
-  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  aws-region: ${{ secrets.AWS_REGION }}
-  This has real downsides for a production pipeline specifically:
+**Resolution:** updated each affected environment's deployment branch policy to permit `main` (or removed branch-level restriction entirely, since `qa` no longer exists as a concept in the new flow).
 
-No expiration. A static access key/secret pair is valid until someone manually rotates or revokes it — could be indefinitely if a leak goes unnoticed.
-Not scoped to this workflow. The key works from anywhere it's copied to — a local laptop, a different repo, a different branch. There's nothing tying it to "only GitHub Actions, only this repo, only tag pushes."
-Sits in secrets at rest, always. Even if never leaked, it's a permanent credential sitting in GitHub's secret store rather than something minted fresh per run and discarded after.
-There's also a live typo bug independent of the OIDC question: secrets.AWS_ACCCESS_KEY_ID (triple C) won't match a real secret name, so this step is currently failing auth regardless.
-Your permissions: block already declares id-token: write, and the comment even says "OIDC role assumption into AWS" — the intent was there, it just wasn't wired up in the actual steps.
+---
 
-What OIDC changes
-Instead of a stored key, GitHub mints a short-lived, cryptographically signed identity token for the specific job run (tied to repo, branch/tag ref, and workflow). AWS's IAM trusts GitHub's OIDC provider and assumes a role in exchange for that token — no secret ever stored, and the resulting session credentials expire automatically (typically within an hour). The IAM role's trust policy can restrict exactly which repo/ref is allowed to assume it (e.g. only repo:404bad/shophive:ref:refs/tags/v\*), so even if a workflow run is compromised, the blast radius is scoped by AWS, not by convention.
+## Deployment: Docker Compose
 
-What needs to change in the YAML:
+Production runs via Docker Compose on an EC2 host, pulling signed images from ECR by tag.
 
-configure-aws-credentials switches from aws-access-key-id/aws-secret-access-key to role-to-assume (an IAM role ARN)
-Manual docker login via aws ecr get-login-password is replaced by aws-actions/amazon-ecr-login, which handles the ECR auth token exchange using the already-assumed role
-References to secrets.ECR_REGISTRY_ENDPOINT become steps.ecr-login.outputs.registry, since the login action returns the registry URI rather than you having to store it as a secret
-AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets can be deleted from the repo entirely once this is confirmed working
-The updated file
+```yaml
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: prod_postgres
+    restart: always
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # No host port mapping in prod — RDS is the intended long-term target;
+    # this remains only for environments still running Postgres in-container.
 
-Created a file, ran a command, read a file
-Created a file, ran a command, read a file
+  volume-init:
+    image: busybox
+    container_name: volume_init
+    user: root
+    command:
+      - sh
+      - -c
+      - chown -R 65532:65532 /app/media /app/staticfiles
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
 
-Production pipeline converted to use OIDC-based AWS auth instead of static credentials
-production-pipeline.yml
+  backend:
+    image: ${ECR_REGISTRY}/shophive-prod/backend:${IMAGE_TAG}
+    container_name: django_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SECRET_KEY: ${SECRET_KEY}
+      DEBUG: ${DEBUG}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+    volumes:
+      - static_volume:/app/staticfiles
+      - media_volume:/app/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+      volume-init:
+        condition: service_completed_successfully
+    expose:
+      - "8000"
 
-Overwrite production-pipeline.yml with OIDC version
+  frontend:
+    image: ${ECR_REGISTRY}/shophive-prod/frontend:${IMAGE_TAG}
+    container_name: react_frontend
+    restart: unless-stopped
+    environment:
+      VITE_DJANGO_BASE_URL: ${VITE_DJANGO_BASE_URL}
+    expose:
+      - "80"
+    depends_on:
+      - backend
 
-Script
+  nginx:
+    image: nginx:alpine
+    container_name: nginx_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - static_volume:/app/staticfiles:ro
+      - media_volume:/app/media:ro
+    depends_on:
+      - frontend
+      - backend
 
-Presented file
-Done
-What you need to set up before this runs:
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+```
 
-IAM role (in Terraform, alongside your existing ECR/VPC resources) with a trust policy allowing sts:AssumeRoleWithWebIdentity from GitHub's OIDC provider, scoped to your repo and tag ref — something like the sub condition repo:404bad/shophive:ref:refs/tags/v\*.
-New secret: AWS_ECR_PUSH_ROLE_ARN — the ARN of that role.
-Delete old secrets once confirmed working: AWS_ACCESS_KEY_ID (well, AWS_ACCCESS_KEY_ID as it was mistyped), AWS_SECRET_ACCESS_KEY, and ECR_REGISTRY_ENDPOINT (no longer needed — the login action supplies the registry URI as an output).
-Region moved from a secret to a plain env var at the top (AWS_REGION: ap-south-1) — region isn't sensitive, so it doesn't belong in secrets.
+`ECR_REGISTRY` and `IMAGE_TAG` are supplied via `.env` on the deploy host, keeping which image version is running independent of the compose file itself.
 
-===================
+In GitHub Actions, strategy.matrix lets a single job definition run multiple times in parallel, each with different variable values substituted in — instead of writing the same job twice (or more) with only small differences.
 
-Step 1: Add GitHub's OIDC provider to IAM (one-time, per AWS account)
-Most accounts don't have this yet. Check first — if you've never set up OIDC with GitHub Actions before, you need it.
+```yml
+strategy:
+  matrix:
+    component: [backend, frontend]
+```
 
-Console: IAM → Identity providers → Add provider
+This tells GitHub Actions: run this job twice, once with matrix.component = backend and once with matrix.component = frontend. Both runs execute in parallel, as separate job instances, each with its own logs, its own runner, its own pass/fail status.
 
-Provider type: OpenID Connect
-Provider URL: https://token.actions.githubusercontent.com
-Audience: sts.amazonaws.com
-CLI equivalent:
+Anywhere in the job you reference ${{ matrix.component }}, it gets substituted with whichever value that particular run got assigned.
 
-Step 2: Create the IAM role with a trust policy scoped to your repo/tag
-Save this as trust-policy.json (replace <ACCOUNT_ID>):
+**Why it's used**
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:404bad/shophive:ref:refs/tags/v*"
-        }
-      }
-    }
-  ]
+Without matrix, if you wanted to build both backend and frontend images, you'd either:
+
+1. Duplicate the entire job twice (build-backend, build-frontend) — same steps, copy-pasted, only the image name/context differing, or
+2. Write one job that loops over both components sequentially inside a single run: block — which means frontend has to wait for backend to fully finish before starting, even though they're completely independent of each other.
+
+Matrix solves both problems: one job definition, no duplication, and both variants run simultaneously rather than one after another — so your total pipeline time is closer to "however long the slowest one takes" instead of "sum of both."
+
+**Why it matters practically**
+
+1. Speed: parallel execution instead of sequential, meaningful savings once you have more than one or two variants.
+2. DRY: one job definition instead of maintaining near-duplicate jobs that drift out of sync over time.
+3. Independent pass/fail: if the frontend build fails, you see that clearly as its own failed matrix leg, without it being buried inside a combined job's logs alongside a passing backend build.
+4. Scales cleanly: adding a third component later means adding one line to the matrix array, not writing a whole new job.
+
+### Deploy script
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# ShopHive production deploy script
+#
+# Usage:
+#   ./deploy.sh --registry <ecr-registry>
+# ---------------------------------------------------------------------------
+
+REGION="ap-south-1"
+COMPOSE_FILE="compose.prod.yml"
+
+usage() {
+    echo "Usage: $0 --registry <ecr-registry>"
+    exit 1
 }
+
+REGISTRY=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --registry)
+            REGISTRY="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            usage
+            ;;
+    esac
+done
+
+if [[ -z "$REGISTRY" ]]; then
+    echo "Error: --registry is required." >&2
+    usage
+fi
+
+echo "==> Logging in to ECR ($REGISTRY) in $REGION"
+aws ecr get-login-password --region "$REGION" \
+    | docker login --username AWS --password-stdin "$REGISTRY"
+
+echo "==> Starting containers"
+docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
 ```
 
-Console equivalent: IAM → Roles → Create role → Trusted entity type: Web identity → Identity provider: the one from Step 1 → Audience: sts.amazonaws.com → GitHub organization/repo/ref fields (the console has dedicated fields for this, so you don't need to hand-write the sub condition yourself).
+`ECR_REGISTRY` and `IMAGE_TAG` referenced in `compose.prod.yml` are expected to already be present in `.env` on the deploy host, so the compose file resolves them without needing to pass them through the script's arguments.
 
-Step 3: Attach a least-privilege permissions policy (ECR push only)
+### Host prerequisites (test EC2)
 
-create inline policy
+Before running the deploy script on a fresh instance:
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "ecr:GetAuthorizationToken",
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "ecr:BatchCheckLayerAvailability",
-        "ecr:GetDownloadUrlForLayer",
-        "ecr:BatchGetImage",
-        "ecr:PutImage",
-        "ecr:InitiateLayerUpload",
-        "ecr:UploadLayerPart",
-        "ecr:CompleteLayerUpload"
-      ],
-      "Resource": [
-        "arn:aws:ecr:ap-south-1:<ACCOUNT_ID>:repository/shophive-prod/backend",
-        "arn:aws:ecr:ap-south-1:<ACCOUNT_ID>:repository/shophive-prod/frontend"
-      ]
-    }
-  ]
-}
+```bash
+# Docker
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt-get update
+sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+sudo usermod -aG docker "$USER"
+
+# AWS CLI v2
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
 ```
 
-Note the ecr:GetAuthorizationToken action has to allow Resource: "\*" — this is an ECR API quirk, that particular action doesn't support resource-level restriction, but everything else is scoped down to just your two repos.
+Then run the deploy script:
 
-Step 4: Get the role ARN and add it as a secret
-arn:aws:iam::290657649733:role/shophive-prod-ecr-push
+```bash
+./deploy.sh --registry <ACCOUNT_ID>.dkr.ecr.ap-south-1.amazonaws.com
+```
 
-That value goes into the AWS_ECR_PUSH_ROLE_ARN GitHub secret, exactly like before.
+---
 
-References: https://youtu.be/Sdzd4N6L5Hg?si=oYSTqjz8OkGPmpvd, https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws
+## Why Production Deployment Is Manual
+
+The production pipeline stops at pushing signed, scanned images to ECR — it does not automatically deploy them. Deployment is a deliberate, manual step. This is intentional, not a gap to be automated away later:
+
+- **A human checkpoint before customer-facing traffic changes.** Automated build/scan/sign stages catch known classes of issues, but they can't judge business timing, readiness of dependent services, or whether now is the right moment to ship. A manual trigger keeps a person in the loop for the one step with real customer impact.
+- **Decouples "artifact is ready" from "artifact is live."** A tag being built, scanned, and pushed doesn't obligate an immediate deploy. Images can be promoted whenever it makes sense — outside peak hours, after a dependent fix lands, or once a related staging issue is resolved — without needing to re-run or hold open a CI pipeline.
+- **Reduces blast radius of a single mistake.** A bad tag pushed to ECR is inert until someone deliberately deploys it. Fully automated production deploys mean a bad tag becomes a live incident the moment CI finishes, with no opportunity to intervene.
+- **Matches current infrastructure maturity.** Production deployment orchestration (health checks, rollback, traffic shifting) isn't fully built out yet. Manual deploys via Compose are appropriate for the current scale and avoid automating a process that isn't fully hardened.
+- **Simple to override when needed.** For emergencies (e.g. a hotfix), a manual deploy takes minutes to run directly on the host — no pipeline redesign required to move fast when it matters.
+
+---
+
+## Next Steps
+
+The next phase of work moves each environment (dev, staging, production) from Docker Compose on individual EC2 hosts to Kubernetes-based deployment, building on the existing MicroK8s cluster and Helm chart work.
